@@ -19,7 +19,7 @@
     {
       "binding": "DB",
       "database_name": "auto-reply-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "e1864491-1b3f-4fcb-a90f-4673d3526c1b",
       "migrations_dir": "migrations"
     }
   ],
