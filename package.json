@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "fake:imap": "node scripts/fake-imap.mjs 20993",
     "fake:pop3": "node scripts/fake-pop3.mjs 21025",
+    "fake:smtp": "node scripts/fake-smtp.mjs 2525",
     "db:migrate:local": "wrangler d1 migrations apply auto-reply-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply auto-reply-db --remote"
   },

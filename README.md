@@ -249,6 +249,7 @@ node scripts/dev-pipeline-test.mjs
 node scripts/dev-auth-test.mjs
 node scripts/dev-features-test.mjs
 node scripts/dev-single-outbound-test.mjs
+node scripts/dev-inline-send-test.mjs
 ```
 
 IMAP / POP3 客户端可以用内置假服务器验证（假服务器会占用终端，请另开终端执行测试脚本）：
@@ -269,6 +270,12 @@ npm run fake:pop3
 
 # 终端 B：POP3 测试
 node scripts/dev-pop3-poll-test.mjs
+
+# 终端 A：SMTP 即时发送测试
+npm run fake:smtp
+
+# 终端 B
+node scripts/dev-inline-send-test.mjs
 ```
 
 ---
@@ -292,6 +299,8 @@ node scripts/dev-pop3-poll-test.mjs
 
 - 一个邮箱可以有一个入站通道（CF Routing / IMAP / POP3）。
 - 一个邮箱只有一个发信通道，发信方式由下方配置决定。
+- 规则 `delaySeconds = 0` 时，SMTP / API 会**立即发送**；发送失败才写入任务队列重试。
+- 延迟发送仍然走 D1 任务队列。
 - 不会自动切换通道：SMTP 失败只重试当前通道；CF 原生回复失败也不会改用 SMTP。
 - 发信方式由该邮箱的出站通道直接决定，没有额外的“默认发信方式”。
 

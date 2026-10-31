@@ -24,6 +24,7 @@ import {
   recordSendLog,
   updateInboundStatus,
 } from "./message-log";
+import { deliverOutbound } from "./delivery";
 
 export interface PipelineOptions {
   cfMessage?: ForwardableEmailMessage;
@@ -360,14 +361,54 @@ export async function processInbound(
     threadKey,
     message: outbound,
   };
-  await enqueueJob(env, {
-    kind: "send",
-    dedupeKey: `send:${inboundId}:${matched.rule.id}`,
-    payload,
-    runAt: timestamp + delaySeconds * 1000,
-  });
-  await updateInboundStatus(env, inboundId, "queued", `等待通过 ${channel.kind} 发送`);
-  return { status: "queued", inboundMessageId: inboundId, ruleId: matched.rule.id };
+
+  if (delaySeconds > 0) {
+    await enqueueJob(env, {
+      kind: "send",
+      dedupeKey: `send:${inboundId}:${matched.rule.id}`,
+      payload,
+      runAt: timestamp + delaySeconds * 1000,
+    });
+    await updateInboundStatus(
+      env,
+      inboundId,
+      "queued",
+      `等待 ${delaySeconds} 秒后通过 ${channel.kind} 发送`,
+    );
+    return { status: "queued", inboundMessageId: inboundId, ruleId: matched.rule.id };
+  }
+
+  try {
+    await deliverOutbound(env, {
+      mailbox,
+      channel,
+      inboundMessageId: inboundId,
+      ruleId: matched.rule.id,
+      threadKey,
+      message: outbound,
+    });
+    return { status: "replied", inboundMessageId: inboundId, ruleId: matched.rule.id };
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error);
+    console.warn("immediate send failed, queued for retry", {
+      mailbox: mailbox.address,
+      channel: channel.kind,
+      message,
+    });
+    await enqueueJob(env, {
+      kind: "send",
+      dedupeKey: `send:${inboundId}:${matched.rule.id}`,
+      payload,
+      runAt: timestamp,
+    });
+    await updateInboundStatus(
+      env,
+      inboundId,
+      "queued",
+      `立即发送失败，已入队重试: ${message}`,
+    );
+    return { status: "queued", inboundMessageId: inboundId, ruleId: matched.rule.id };
+  }
 }
 
 async function skip(

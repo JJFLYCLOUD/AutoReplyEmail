@@ -1,13 +1,10 @@
 import { parseJson } from "../lib/util";
 import { newId, now } from "../lib/util";
 import type { Env, JobRow } from "../types";
-import {
-  outboundMessageFrom,
-  sendViaChannel,
-  type OutboundMessage,
-} from "../adapters/outbound";
+import { type OutboundMessage } from "../adapters/outbound";
 import { getMailbox, getOutboundChannel, getOutboundChannelById, listOutboundChannels } from "./store";
-import { insertOutboundMessage, recordSendLog, updateInboundStatus } from "./message-log";
+import { updateInboundStatus } from "./message-log";
+import { deliverOutbound } from "./delivery";
 
 export interface SendJobPayload {
   mailboxId: string;
@@ -129,39 +126,15 @@ async function runSendJob(env: Env, payload: SendJobPayload): Promise<void> {
     ? await getOutboundChannelById(env, payload.channelId)
     : await getOutboundChannel(env, mailbox.id);
   if (!channel) throw new Error("没有可用的发信通道");
-  if (channel.status !== "active") throw new Error("发信通道已停用");
-  if (channel.kind === "cf_reply") {
-    throw new Error("cf_reply 只能即时回复 Cloudflare Email Routing 入站邮件");
-  }
 
-  const message = outboundMessageFrom(mailbox, channel, {
-    to: payload.message.to,
-    subject: payload.message.subject,
-    text: payload.message.text,
-    html: payload.message.html,
-    headers: payload.message.headers,
-  });
-
-  const result = await sendViaChannel(env, channel, message);
-
-  const outboundId = await insertOutboundMessage(env, {
-    mailboxId: mailbox.id,
-    channelId: channel.id,
-    inReplyTo: payload.message.headers["In-Reply-To"] || null,
-    references: (payload.message.headers.References || "").split(/\s+/).filter(Boolean),
-    threadKey: payload.threadKey,
-    from: message.from.email,
-    fromName: message.from.name,
-    to: message.to,
-    subject: message.subject,
-    text: message.text,
-    html: message.html,
+  await deliverOutbound(env, {
+    mailbox,
+    channel,
+    inboundMessageId: payload.inboundMessageId,
     ruleId: payload.ruleId,
-    status: "sent",
+    threadKey: payload.threadKey,
+    message: payload.message,
   });
-
-  await recordSendLog(env, outboundId, channel.kind, result.providerMessageId || null, result.response || null);
-  await updateInboundStatus(env, payload.inboundMessageId, "replied");
 }
 
 export async function listJobs(env: Env, limit = 100): Promise<JobRow[]> {
