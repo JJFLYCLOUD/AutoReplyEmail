@@ -261,6 +261,9 @@ npm run fake:imap
 node scripts/dev-imap-test.mjs
 node scripts/dev-imap-poll-test.mjs
 
+# 可选：模拟服务器乱序返回 TEXT / HEADER
+npm run fake:imap -- --reverse-parts
+
 # 停止 IMAP 假服务器后，终端 A 启动 POP3 假服务器
 npm run fake:pop3
 

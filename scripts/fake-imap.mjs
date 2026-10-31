@@ -1,10 +1,11 @@
 /**
  * Minimal fake IMAP server for local client testing.
- * Usage: node scripts/fake-imap.mjs [port]
+ * Usage: node scripts/fake-imap.mjs [port] [--reverse-parts]
  */
 import net from "node:net";
 
 const port = Number(process.argv[2] || 20993);
+const reverseParts = process.argv.includes("--reverse-parts");
 const header =
   "From: Alice <alice@example.net>\r\n" +
   "To: support@example.com\r\n" +
@@ -43,13 +44,25 @@ const server = net.createServer((socket) => {
         socket.write(`${tag} OK SEARCH completed\r\n`);
       } else if (upper === "UID" && line.toUpperCase().includes("FETCH")) {
         const uid = line.match(/UID FETCH (\d+)/i)?.[1] || "1";
-        socket.write(
-          `* 1 FETCH (UID ${uid} RFC822.SIZE ${messageSize} BODY[HEADER] {${Buffer.byteLength(header)}}\r\n`,
-        );
-        socket.write(header);
-        socket.write(` BODY[TEXT]<0> {${Buffer.byteLength(body)}}\r\n`);
-        socket.write(body);
-        socket.write(")\r\n");
+        if (reverseParts) {
+          // Intentionally return TEXT before HEADER to reproduce servers
+          // that do not preserve data-item order.
+          socket.write(
+            `* 1 FETCH (UID ${uid} RFC822.SIZE ${messageSize} BODY[TEXT]<0> {${Buffer.byteLength(body)}}\r\n`,
+          );
+          socket.write(body);
+          socket.write(` BODY[HEADER] {${Buffer.byteLength(header)}}\r\n`);
+          socket.write(header);
+          socket.write(")\r\n");
+        } else {
+          socket.write(
+            `* 1 FETCH (UID ${uid} RFC822.SIZE ${messageSize} BODY[HEADER] {${Buffer.byteLength(header)}}\r\n`,
+          );
+          socket.write(header);
+          socket.write(` BODY[TEXT]<0> {${Buffer.byteLength(body)}}\r\n`);
+          socket.write(body);
+          socket.write(")\r\n");
+        }
         socket.write(`${tag} OK FETCH completed\r\n`);
       } else if (upper === "LOGOUT") {
         socket.write("* BYE fake imap logging out\r\n");

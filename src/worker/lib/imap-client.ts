@@ -53,9 +53,15 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
+interface LiteralPart {
+  marker: string;
+  bytes: Uint8Array;
+}
+
 interface CommandResult {
   lines: string[];
   literals: Uint8Array[];
+  literalParts: LiteralPart[];
   ok: boolean;
   text: string;
 }
@@ -157,6 +163,7 @@ export class ImapClient {
     await this.write(`${tag} ${command}\r\n`);
     const lines: string[] = [];
     const literals: Uint8Array[] = [];
+    const literalParts: LiteralPart[] = [];
     let pendingContinuation = continuation;
 
     while (true) {
@@ -177,6 +184,7 @@ export class ImapClient {
         return {
           lines,
           literals,
+          literalParts,
           ok: /^OK\b/i.test(line.slice(tag.length + 1).trim()),
           text,
         };
@@ -184,7 +192,9 @@ export class ImapClient {
 
       const literal = line.match(/\{(\d+)\}\s*$/);
       if (literal) {
-        literals.push(await this.readBytes(Number(literal[1])));
+        const bytes = await this.readBytes(Number(literal[1]));
+        literals.push(bytes);
+        literalParts.push({ marker: line, bytes });
       }
     }
   }
@@ -230,12 +240,36 @@ export class ImapClient {
       `UID FETCH ${uid} (UID RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.16384>)`,
     );
     if (!result.ok) throw new Error(`IMAP FETCH 失败: ${result.text}`);
-    const header = result.literals[0] ? decoder.decode(result.literals[0]) : "";
-    const body = result.literals[1] ? decoder.decode(result.literals[1]) : "";
-    const size = Number(result.lines.join(" ").match(/RFC822\.SIZE\s+(\d+)/i)?.[1] || header.length + body.length);
-    const raw = header.endsWith("\r\n\r\n")
-      ? `${header}${body}`
-      : `${header}\r\n\r\n${body}`;
+
+    // IMAP servers may return FETCH data items in any order.
+    // Match literals by their section marker instead of relying on order.
+    let headerBytes: Uint8Array | undefined;
+    let bodyBytes: Uint8Array | undefined;
+    for (const part of result.literalParts) {
+      const marker = part.marker.toUpperCase();
+      if (marker.includes("BODY[HEADER]") || marker.includes("BODY.PEEK[HEADER]")) {
+        headerBytes = part.bytes;
+      } else if (marker.includes("BODY[TEXT]") || marker.includes("BODY.PEEK[TEXT]")) {
+        bodyBytes = part.bytes;
+      }
+    }
+
+    if (!headerBytes && !bodyBytes) {
+      headerBytes = result.literals[0];
+      bodyBytes = result.literals[1];
+    } else if (!headerBytes) {
+      headerBytes = result.literals.find((bytes) => bytes !== bodyBytes);
+    } else if (!bodyBytes) {
+      bodyBytes = result.literals.find((bytes) => bytes !== headerBytes);
+    }
+
+    const header = headerBytes ? decoder.decode(headerBytes) : "";
+    const body = bodyBytes ? decoder.decode(bodyBytes) : "";
+    const size = Number(
+      result.lines.join(" ").match(/RFC822\.SIZE\s+(\d+)/i)?.[1] ||
+        header.length + body.length,
+    );
+    const raw = header.endsWith("\r\n\r\n") ? `${header}${body}` : `${header}\r\n\r\n${body}`;
     return { uid, size, header, body, raw };
   }
 

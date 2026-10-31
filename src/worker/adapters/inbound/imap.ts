@@ -95,7 +95,19 @@ function normalizeImapMessage(
   message: { uid: number; size: number; header: string; body: string; raw: string },
 ): NormalizedInbound & { raw: string } {
   const headers = parseHeaderBlock(message.header || message.raw);
+  if (!headers.from) {
+    // Some IMAP servers have returned the HEADER/TEXT literals in reverse order.
+    // If the header block has no From, try the body block before giving up.
+    const alternate = parseHeaderBlock(message.body);
+    if (alternate.from) Object.assign(headers, alternate);
+  }
   const from = parseAddress(decodeMimeWords(headers.from || ""));
+  if (!from.email) {
+    console.warn("IMAP message has no From header", {
+      uid: message.uid,
+      headerPreview: message.header.slice(0, 200),
+    });
+  }
   const to = parseAddressList(headers.to || "").map((v) => v.email);
   const cc = parseAddressList(headers.cc || "").map((v) => v.email);
   const subject = decodeMimeWords(headers.subject || "");
