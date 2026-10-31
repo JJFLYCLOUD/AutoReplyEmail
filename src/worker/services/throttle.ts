@@ -8,7 +8,6 @@ export interface ThrottleInput {
   senderKey: string;
   cooldownHours: number;
   maxPerThread: number;
-  maxPerDay: number;
   globalDailyLimit: number;
 }
 
@@ -35,19 +34,6 @@ export async function claimReply(env: Env, input: ThrottleInput): Promise<Thrott
         code: "sender_cooldown",
         reason: `同一发件人 ${input.cooldownHours} 小时内已回复`,
       };
-    }
-  }
-
-  if (input.maxPerDay > 0) {
-    const dayStart = startOfUtcDay(timestamp);
-    const row = await env.DB.prepare(
-      `SELECT COUNT(*) AS count FROM reply_ledger
-       WHERE mailbox_id = ? AND rule_id = ? AND replied_at >= ?`,
-    )
-      .bind(input.mailboxId, input.ruleId, dayStart)
-      .first<{ count: number }>();
-    if ((row?.count || 0) >= input.maxPerDay) {
-      return { allowed: false, code: "rule_daily_limit", reason: "规则今日回复额度已用完" };
     }
   }
 
@@ -93,7 +79,6 @@ export async function claimReply(env: Env, input: ThrottleInput): Promise<Thrott
 export async function releaseReplyClaim(
   env: Env,
   mailboxId: string,
-  ruleId: string,
   threadKey: string,
 ): Promise<void> {
   await env.DB.prepare(

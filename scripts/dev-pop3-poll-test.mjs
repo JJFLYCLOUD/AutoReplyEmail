@@ -28,7 +28,6 @@ const mailbox = await call("/mailboxes", {
     address: email,
     matchMode: "exact",
     enabled: true,
-    replyVia: "smtp",
     inbound: {
       kind: "pop3",
       host: "127.0.0.1",
@@ -59,7 +58,6 @@ console.log("test-inbound:", JSON.stringify(test));
 const template = await call("/templates", {
   method: "POST",
   body: {
-    mailboxId,
     name: "POP3 template",
     locale: "en",
     subjectTpl: "Re: {{subject}}",
@@ -70,12 +68,12 @@ const template = await call("/templates", {
 await call("/rules", {
   method: "POST",
   body: {
-    mailboxId,
+    mailboxIds: [mailboxId],
     name: "price",
     priority: 10,
     enabled: true,
     match: { any: [{ field: "body", op: "contains", value: "price" }] },
-    guards: { cooldownHours: 24, maxPerThread: 1, maxPerDay: 50 },
+    guards: { cooldownHours: 24, maxPerThread: 1 },
     action: { type: "reply", templateId: template.id, ai: { mode: "off" }, delaySeconds: 0 },
   },
 });

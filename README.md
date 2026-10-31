@@ -16,8 +16,9 @@
 - **Cloudflare Email Routing 入站**：使用 `message.reply()` 免费即时回复，自动保持邮件线程。
 - **IMAP / POP3 入站**：Cron 增量拉取，支持 TLS / STARTTLS、UID / UIDL 去重。
 - **多通道发信**：Cloudflare 原生回复、SMTP、Resend、Mailgun。
-- **关键词规则**：主题 / 正文 / 发件人 / 域名 / 头部 / 正则，支持优先级。
-- **模板系统**：变量、条件块、纯文本 + HTML、多语言、预览。
+- **关键词规则**：一条规则可绑定多个邮箱，主题 / 正文 / 发件人 / 域名 / 头部 / 正则，支持优先级。
+- **域名过滤**：规则级发件人域名白名单 / 黑名单，可选包含子域名。
+- **模板系统**：全局模板，所有邮箱共用；变量、条件块、纯文本 + HTML、多语言、预览。
 - **AI 回复**：Workers AI 或 OpenAI 兼容 API；支持 AI 润色、AI 选择模板、失败回退模板。
 - **防循环**：RFC 3834、Auto-Submitted、Precedence、List-Id、退信、References 上限、发件人冷却、线程上限、抑制名单。
 - **可观测**：收发日志、原始 `.eml`、任务队列、重试、审计日志。
@@ -246,6 +247,8 @@ npm run build
 node scripts/dev-smoke.mjs
 node scripts/dev-pipeline-test.mjs
 node scripts/dev-auth-test.mjs
+node scripts/dev-features-test.mjs
+node scripts/dev-single-outbound-test.mjs
 ```
 
 IMAP / POP3 客户端可以用内置假服务器验证（假服务器会占用终端，请另开终端执行测试脚本）：
@@ -285,12 +288,16 @@ node scripts/dev-pop3-poll-test.mjs
 ### 邮箱
 
 - 一个邮箱可以有一个入站通道（CF Routing / IMAP / POP3）。
-- 可以配置多个发信通道；`reply_via` 决定优先使用哪个。
-- CF 邮箱建议再配置一个 SMTP / API 通道作为兜底。
+- 一个邮箱只有一个发信通道，发信方式由下方配置决定。
+- 不会自动切换通道：SMTP 失败只重试当前通道；CF 原生回复失败也不会改用 SMTP。
+- 发信方式由该邮箱的出站通道直接决定，没有额外的“默认发信方式”。
 
 ### 规则
 
+- 一条规则可以绑定一个或多个邮箱。
+- 避免重复：同一规则不要绑定到多个会同时收到同一封邮件的地址。
 - 关键词同时匹配主题和正文，支持“任一命中 / 全部命中”。
+- 模板是全局的，所有邮箱的规则都可以使用同一套模板。
 - 高级条件支持 JSON：
 
 ```json
@@ -302,7 +309,36 @@ node scripts/dev-pop3-poll-test.mjs
 }
 ```
 
-- 支持冷却时间、同一会话回复上限、每日上限、业务时间、延迟发送。
+- 支持冷却时间、同一会话回复上限、业务时间、延迟发送。
+- 删除邮箱时，如果规则已经没有其他绑定邮箱，规则会自动停用但不会删除。
+
+### 发件人域名过滤
+
+每条规则可以单独设置发件人域名过滤：
+
+- **不限制**：所有发件人都可以命中
+- **白名单**：只有列表中的域名可以命中本规则
+- **黑名单**：列表中的域名不会命中本规则
+
+选项：
+
+- 域名不区分大小写，支持 `example.com` 或 `@example.com`
+- 开启“包含子域名”时，`example.com` 也会匹配 `mail.example.com`
+- 白名单为空时规则永不命中
+- 黑名单只影响当前规则；全局拉黑请使用「设置 → 抑制名单」
+
+示例：
+
+```json
+{
+  "matchAll": true,
+  "domainFilter": {
+    "mode": "allow",
+    "domains": ["customer.com", "partner.cn"],
+    "includeSubdomains": true
+  }
+}
+```
 - AI 模式：
   - `off`：只用模板
   - `polish`：AI 润色模板
@@ -339,7 +375,6 @@ node scripts/dev-pop3-poll-test.mjs
 - 抑制名单
 - 同一发件人冷却（默认 24 小时）
 - 同一线程回复上限（默认 1 次）
-- 单规则每日上限（默认 50）
 - 邮箱每日发信上限（默认 500）
 
 发出的回复统一带：
@@ -374,7 +409,7 @@ wrangler.jsonc
 
 数据库表：
 
-`users`（预留多账号）、`mailboxes`、`inbound_channels`、`outbound_channels`、`rules`、`templates`、`messages`、`send_log`、`reply_ledger`、`suppressions`、`jobs`、`ai_usage`、`pop3_seen`、`login_attempts`、`audit_log`、`settings`。
+`users`（预留多账号）、`mailboxes`、`inbound_channels`、`outbound_channels`、`rules`、`rule_mailboxes`、`templates`（全局）、`messages`、`send_log`、`reply_ledger`、`suppressions`、`jobs`、`ai_usage`、`pop3_seen`、`login_attempts`、`audit_log`、`settings`。
 
 ---
 
@@ -402,10 +437,10 @@ wrangler.jsonc
 在 Worker Settings 添加 `CREDENTIAL_KEY` Secret。
 
 **Q：CF 邮箱回复失败？**  
-`message.reply()` 要求 DMARC 通过、同域、References ≤100。建议给该邮箱再配置 SMTP / Resend / Mailgun 作为兜底。
+`message.reply()` 要求 DMARC 通过、同域、References ≤100。本应用不会自动切换备用通道；失败会记录为失败，请改用 SMTP/API 通道或检查邮件条件。
 
 **Q：提示 `no_outbound_channel`？**  
-IMAP / POP3 邮箱不能使用 `cf_reply`，需要配置 SMTP 或 API 发信通道。
+该邮箱没有配置可用的发信通道，或者 IMAP/POP3 邮箱配置了 `cf_reply`。请选择 SMTP / Resend / Mailgun。
 
 **Q：Email Routing 启用后原有邮箱收不到信？**  
 域名的 MX 被 Cloudflare 接管了。不要把已有 Google / Microsoft 邮箱的域名直接切到 Email Routing；请使用独立子域。
@@ -420,7 +455,7 @@ IMAP / POP3 邮箱不能使用 `cf_reply`，需要配置 SMTP 或 API 发信通�
 可以。添加 IMAP 邮箱时填对应服务器和授权码即可，发信使用对应 SMTP。
 
 **Q：能延迟回复吗？**  
-CF 原生回复只能即时；IMAP / SMTP / API 通道支持规则里的 `delaySeconds`。
+只有 SMTP / Resend / Mailgun 通道支持规则里的 `delaySeconds`。CF 原生回复只能即时；如果规则设置了延迟，CF 邮箱会跳过并记录原因，不会切换通道。
 
 ---
 

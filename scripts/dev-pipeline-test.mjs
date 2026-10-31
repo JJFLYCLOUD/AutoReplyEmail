@@ -34,7 +34,6 @@ const mailbox = await call("/mailboxes", {
     address: email,
     matchMode: "exact",
     enabled: true,
-    replyVia: "smtp",
     inbound: { kind: "cf_routing" },
     outbound: {
       kind: "smtp",
@@ -52,7 +51,6 @@ const mailboxId = mailbox.mailbox.id;
 const template = await call("/templates", {
   method: "POST",
   body: {
-    mailboxId,
     name: "Pipeline template",
     locale: "en",
     subjectTpl: "Re: {{subject}}",
@@ -63,12 +61,12 @@ const template = await call("/templates", {
 await call("/rules", {
   method: "POST",
   body: {
-    mailboxId,
+    mailboxIds: [mailboxId],
     name: "price",
     priority: 10,
     enabled: true,
     match: { any: [{ field: "subject", op: "contains", value: "price" }] },
-    guards: { cooldownHours: 24, maxPerThread: 1, maxPerDay: 50 },
+    guards: { cooldownHours: 24, maxPerThread: 1 },
     action: { type: "reply", templateId: template.id, ai: { mode: "off" }, delaySeconds: 0 },
   },
 });

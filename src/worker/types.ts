@@ -37,7 +37,6 @@ export interface MailboxRow {
   owner_id: string | null;
   timezone: string;
   enabled: number;
-  reply_via: string;
   created_at: number;
   updated_at: number;
 }
@@ -78,7 +77,6 @@ export interface OutboundChannelRow {
 
 export interface RuleRow {
   id: string;
-  mailbox_id: string;
   name: string;
   priority: number;
   enabled: number;
@@ -91,7 +89,6 @@ export interface RuleRow {
 
 export interface TemplateRow {
   id: string;
-  mailbox_id: string;
   name: string;
   locale: string;
   subject_tpl: string;

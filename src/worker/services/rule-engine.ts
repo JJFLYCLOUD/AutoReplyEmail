@@ -21,10 +21,17 @@ export const conditionSchema = z.object({
   caseSensitive: z.boolean().optional(),
 });
 
+export const domainFilterSchema = z.object({
+  mode: z.enum(["off", "allow", "deny"]).default("off"),
+  domains: z.array(z.string().min(1).max(255)).default([]),
+  includeSubdomains: z.boolean().default(true),
+});
+
 export const ruleMatchSchema = z.object({
   all: z.array(conditionSchema).optional(),
   any: z.array(conditionSchema).optional(),
   matchAll: z.boolean().optional(),
+  domainFilter: domainFilterSchema.optional(),
 });
 
 export const businessHoursSchema = z.object({
@@ -43,7 +50,6 @@ export const ruleGuardsSchema = z.object({
   allowSelf: z.boolean().optional(),
   cooldownHours: z.number().min(0).max(24 * 365).optional(),
   maxPerThread: z.number().int().min(1).max(100).optional(),
-  maxPerDay: z.number().int().min(1).max(10000).optional(),
   businessHours: businessHoursSchema.nullable().optional(),
 });
 
@@ -69,6 +75,7 @@ export const ruleInputSchema = z.object({
 });
 
 export type Condition = z.infer<typeof conditionSchema>;
+export type DomainFilter = z.infer<typeof domainFilterSchema>;
 export type RuleMatch = z.infer<typeof ruleMatchSchema>;
 export type RuleGuards = z.infer<typeof ruleGuardsSchema>;
 export type RuleAction = z.infer<typeof ruleActionSchema>;
@@ -158,7 +165,35 @@ export function evaluateCondition(condition: Condition, ctx: MatchContext): bool
   return values.some((actual) => textMatch(actual || "", condition.op, expected, caseSensitive));
 }
 
+function normalizeDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^@/, "")
+    .replace(/^\*\./, "")
+    .replace(/\.$/, "");
+}
+
+function domainMatches(actual: string, ruleDomain: string, includeSubdomains: boolean): boolean {
+  const expected = normalizeDomain(ruleDomain);
+  if (!expected) return false;
+  if (actual === expected) return true;
+  return includeSubdomains && actual.endsWith(`.${expected}`);
+}
+
+function matchesDomainFilter(filter: DomainFilter | undefined, from: string): boolean {
+  if (!filter || filter.mode === "off") return true;
+  const actual = addressDomain(from);
+  if (!actual) return false;
+  const matched = filter.domains.some((domain) =>
+    domainMatches(actual, domain, filter.includeSubdomains !== false),
+  );
+  if (filter.mode === "allow") return matched;
+  return !matched;
+}
+
 export function matchesRule(match: RuleMatch, ctx: MatchContext): boolean {
+  if (!matchesDomainFilter(match.domainFilter, ctx.from)) return false;
   if (match.matchAll) return true;
 
   const all = match.all || [];

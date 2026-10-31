@@ -9,7 +9,6 @@ import type { Env, MailboxRow, NormalizedInbound, RuleRow, TemplateRow } from ".
 import { sendCfReply } from "../adapters/outbound/cf-reply";
 import {
   outboundMessageFrom,
-  resolveOutboundCandidates,
 } from "../adapters/outbound";
 import { evaluateStaticGuards } from "./guard";
 import { matchesRule, parseRuleAction, parseRuleGuards, parseRuleMatch } from "./rule-engine";
@@ -19,7 +18,7 @@ import { renderTemplate, normalizeReplySubject, quoteBody } from "./template";
 import { loadSettings } from "./settings";
 import { aiClassify, aiPolish } from "./ai";
 import { enqueueJob, type SendJobPayload } from "./jobs";
-import { getTemplate, listRules, listTemplates } from "./store";
+import { getTemplate, getOutboundChannel, listRules, listTemplates } from "./store";
 import {
   insertOutboundMessage,
   recordSendLog,
@@ -134,7 +133,7 @@ export async function processInbound(
     const action = parseRuleAction(rule.action_json);
     if (!action) continue;
     const template = await getTemplate(env, action.templateId);
-    if (!template || template.mailbox_id !== mailbox.id) continue;
+    if (!template) continue;
     matched = { rule, template };
     break;
   }
@@ -144,7 +143,7 @@ export async function processInbound(
   }
 
   if (!matched && settings.ai.enabled && settings.ai.classifyFallback) {
-    const templates = await listTemplates(env, mailbox.id);
+    const templates = await listTemplates(env);
     if (templates.length) {
       const aiPick = await aiClassify(
         env,
@@ -171,7 +170,6 @@ export async function processInbound(
         matched = {
           rule: {
             id: "ai-classify",
-            mailbox_id: mailbox.id,
             name: "AI 分类",
             priority: 999,
             enabled: 1,
@@ -200,7 +198,7 @@ export async function processInbound(
 
   let template = matched.template;
   if (actionAi.mode === "classify" && settings.ai.enabled) {
-    const templates = await listTemplates(env, mailbox.id);
+    const templates = await listTemplates(env);
     const aiPick = await aiClassify(
       env,
       settings,
@@ -227,7 +225,6 @@ export async function processInbound(
     senderKey: inbound.from,
     cooldownHours: guards.cooldownHours ?? 24,
     maxPerThread: guards.maxPerThread ?? 1,
-    maxPerDay: guards.maxPerDay ?? 50,
     globalDailyLimit: settings.globalDailyLimit,
   });
   if (!throttle.allowed) {
@@ -288,25 +285,51 @@ export async function processInbound(
   };
 
   const delaySeconds = action.delaySeconds || 0;
-  const preferCfReply =
-    Boolean(options.cfMessage) &&
-    delaySeconds === 0 &&
-    (mailbox.reply_via === "cf_reply" || mailbox.reply_via === "auto");
+  const channel = await getOutboundChannel(env, mailbox.id);
 
-  if (preferCfReply && options.cfMessage) {
-    const cfMessage = outboundMessageFrom(mailbox, null, replyInput);
+  if (!channel || channel.status !== "active") {
+    await releaseReplyClaim(env, mailbox.id, threadKey);
+    return await fail(
+      env,
+      inboundId,
+      "no_outbound_channel",
+      "该邮箱没有可用的发信通道",
+    );
+  }
+
+  if (channel.kind === "cf_reply") {
+    if (!options.cfMessage) {
+      await releaseReplyClaim(env, mailbox.id, threadKey);
+      return await fail(
+        env,
+        inboundId,
+        "cf_reply_requires_cf_routing",
+        "cf_reply 只能用于 Cloudflare Email Routing 入站邮件",
+      );
+    }
+    if (delaySeconds > 0) {
+      await releaseReplyClaim(env, mailbox.id, threadKey);
+      return await fail(
+        env,
+        inboundId,
+        "cf_reply_no_delay",
+        "Cloudflare 原生回复不支持延迟发送",
+      );
+    }
+
+    const cfMessage = outboundMessageFrom(mailbox, channel, replyInput);
     const cfSender = inbound.to[0] || mailbox.address;
     cfMessage.from.email = cfSender;
     try {
       await sendCfReply(options.cfMessage, cfMessage);
       const outboundId = await insertOutboundMessage(env, {
         mailboxId: mailbox.id,
-        channelId: null,
+        channelId: channel.id,
         inReplyTo: inReplyTo || inbound.messageId,
         references,
         threadKey,
         from: cfSender,
-        fromName: mailbox.display_name || cfSender,
+        fromName: channel.from_name || mailbox.display_name || cfSender,
         to: inbound.from,
         subject,
         text: rendered.text,
@@ -318,24 +341,14 @@ export async function processInbound(
       await updateInboundStatus(env, inboundId, "replied");
       return { status: "replied", inboundMessageId: inboundId, ruleId: matched.rule.id };
     } catch (error) {
-      console.error("cf reply failed, falling back", String(error));
+      await releaseReplyClaim(env, mailbox.id, threadKey);
+      return await fail(
+        env,
+        inboundId,
+        "cf_reply_failed",
+        `Cloudflare 原生回复失败: ${String(error instanceof Error ? error.message : error)}`,
+      );
     }
-  }
-
-  const candidates = (await resolveOutboundCandidates(env, mailbox)).filter(
-    (channel) => channel.kind !== "cf_reply",
-  );
-  const channel = candidates[0];
-  if (!channel) {
-    await releaseReplyClaim(env, mailbox.id, matched.rule.id, threadKey);
-    return await skip(
-      env,
-      inboundId,
-      "no_outbound_channel",
-      preferCfReply
-        ? "Cloudflare 原生回复失败，且没有备用 SMTP/API 通道"
-        : "没有可用的 SMTP/API 发信通道",
-    );
   }
 
   const outbound = outboundMessageFrom(mailbox, channel, replyInput);
@@ -365,6 +378,16 @@ async function skip(
 ): Promise<PipelineResult> {
   await updateInboundStatus(env, inboundId, "skipped", `${code}: ${reason}`);
   return { status: "skipped", inboundMessageId: inboundId, reason: `${code}: ${reason}` };
+}
+
+async function fail(
+  env: Env,
+  inboundId: string,
+  code: string,
+  reason: string,
+): Promise<PipelineResult> {
+  await updateInboundStatus(env, inboundId, "failed", `${code}: ${reason}`);
+  return { status: "failed", inboundMessageId: inboundId, reason: `${code}: ${reason}` };
 }
 
 async function isSuppressed(env: Env, mailboxId: string, from: string): Promise<boolean> {

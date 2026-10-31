@@ -5,8 +5,10 @@ import {
   deleteMailbox,
   findMailboxForRecipient,
   getMailbox,
+  getOutboundChannel,
   getOutboundChannelById,
   getRule,
+  getRuleMailboxIds,
   getTemplate,
   listInboundChannels,
   listMailboxes,
@@ -14,6 +16,7 @@ import {
   listTemplates,
   logAudit,
   publicChannel,
+  replaceRuleMailboxes,
   saveMailbox,
 } from "../services/store";
 import { requireAdmin, handleLogin, handleLogout, getAuthConfig, isAuthConfigured } from "../services/auth";
@@ -24,7 +27,7 @@ import { renderTemplate } from "../services/template";
 import { loadSettings, toPublicSettings, updateSettings } from "../services/settings";
 import { getMessage, insertOutboundMessage, listMessages, recordSendLog } from "../services/message-log";
 import { drainJobs, listJobs, retryJob } from "../services/jobs";
-import { outboundMessageFrom, resolveOutboundCandidates, sendViaChannel } from "../adapters/outbound";
+import { outboundMessageFrom, sendViaChannel } from "../adapters/outbound";
 import { testImapConnection } from "../adapters/inbound/imap";
 import { testPop3Connection } from "../adapters/inbound/pop3";
 import { ImapClient } from "../lib/imap-client";
@@ -71,13 +74,11 @@ const mailboxSchema = z.object({
   matchMode: z.enum(["exact", "domain"]).optional(),
   timezone: z.string().max(64).optional(),
   enabled: z.boolean().optional(),
-  replyVia: z.enum(["auto", "cf_reply", "smtp", "resend", "mailgun"]).optional(),
   inbound: inboundSchema.nullish(),
   outbound: outboundSchema.nullish(),
 });
 
 const templateSchema = z.object({
-  mailboxId: z.string().min(1),
   name: z.string().min(1).max(120),
   locale: z.string().max(20).optional(),
   subjectTpl: z.string().min(1).max(900),
@@ -116,6 +117,28 @@ function forbidden(c: any): Response {
 
 function invalid(c: any, issues: unknown): Response {
   return c.json({ error: "invalid_request", issues }, 400);
+}
+
+const mailboxIdsSchema = z.array(z.string().min(1)).min(1).max(100);
+
+function parseMailboxIds(body: Record<string, unknown>): string[] | null {
+  const raw =
+    body.mailboxIds ??
+    (typeof body.mailboxId === "string" ? [body.mailboxId] : undefined);
+  const parsed = mailboxIdsSchema.safeParse(raw);
+  return parsed.success ? [...new Set(parsed.data)] : null;
+}
+
+async function mailboxesExist(env: Env, mailboxIds: string[]): Promise<boolean> {
+  const unique = [...new Set(mailboxIds)];
+  if (!unique.length) return false;
+  const placeholders = unique.map(() => "?").join(",");
+  const result = await env.DB.prepare(
+    `SELECT id FROM mailboxes WHERE id IN (${placeholders})`,
+  )
+    .bind(...unique)
+    .all<{ id: string }>();
+  return (result.results || []).length === unique.length;
 }
 
 async function audit(
@@ -213,11 +236,12 @@ export function createApi(): Hono<AppEnv> {
     const mailboxes = await listMailboxes(c.env);
     const items = await Promise.all(
       mailboxes.map(async (mailbox) => {
-        const [inbound, outbound, templates, rules] = await Promise.all([
+        const [inbound, outbound, rules] = await Promise.all([
           listInboundChannels(c.env, mailbox.id),
           listOutboundChannels(c.env, mailbox.id),
-          listTemplates(c.env, mailbox.id),
-          c.env.DB.prepare("SELECT COUNT(*) AS count FROM rules WHERE mailbox_id = ?")
+          c.env.DB.prepare(
+            "SELECT COUNT(*) AS count FROM rule_mailboxes WHERE mailbox_id = ?",
+          )
             .bind(mailbox.id)
             .first<{ count: number }>(),
         ]);
@@ -226,7 +250,6 @@ export function createApi(): Hono<AppEnv> {
           enabled: Boolean(mailbox.enabled),
           inbound: inbound.map(publicChannel),
           outbound: outbound.map(publicChannel),
-          templateCount: templates.length,
           ruleCount: rules?.count || 0,
         };
       }),
@@ -260,7 +283,6 @@ export function createApi(): Hono<AppEnv> {
         matchMode: (input.matchMode as "exact" | "domain" | undefined) ?? (existing.match_mode as "exact" | "domain"),
         timezone: input.timezone ?? existing.timezone,
         enabled: input.enabled ?? Boolean(existing.enabled),
-        replyVia: input.replyVia ?? existing.reply_via,
         inbound: input.inbound ?? undefined,
         outbound: input.outbound ?? undefined,
       },
@@ -307,12 +329,9 @@ export function createApi(): Hono<AppEnv> {
     if (!emailRegex.test(to)) return c.json({ error: "invalid_recipient" }, 400);
 
     let channel = body.channelId ? await getOutboundChannelById(c.env, body.channelId) : null;
-    if (!channel) {
-      const candidates = await resolveOutboundCandidates(c.env, mailbox);
-      channel = candidates.find((item) => item.kind !== "cf_reply") || null;
-    }
+    if (!channel) channel = await getOutboundChannel(c.env, mailbox.id);
     if (!channel || channel.kind === "cf_reply") {
-      return c.json({ error: "no_outbound_channel", message: "请先配置 SMTP 或 API 发信通道" }, 400);
+      return c.json({ error: "no_outbound_channel", message: "请为该邮箱配置 SMTP 或 API 发信通道" }, 400);
     }
 
     const message = outboundMessageFrom(mailbox, channel, {
@@ -332,31 +351,21 @@ export function createApi(): Hono<AppEnv> {
   });
 
   api.get("/templates", async (c) => {
-    const mailboxId = c.req.query("mailboxId");
-    if (mailboxId) {
-      return c.json({ items: await listTemplates(c.env, mailboxId) });
-    }
-    const result = await c.env.DB.prepare(
-      "SELECT * FROM templates ORDER BY created_at DESC LIMIT 200",
-    ).all();
-    return c.json({ items: result.results || [] });
+    return c.json({ items: await listTemplates(c.env) });
   });
 
   api.post("/templates", async (c) => {
     if (!requireAdmin(c)) return forbidden(c);
     const parsed = templateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return invalid(c, parsed.error.issues);
-    const mailbox = await getMailbox(c.env, parsed.data.mailboxId);
-    if (!mailbox) return c.json({ error: "mailbox_not_found" }, 404);
     const id = newId("tpl");
     const timestamp = now();
     await c.env.DB.prepare(
-      `INSERT INTO templates (id, mailbox_id, name, locale, subject_tpl, text_tpl, html_tpl,
-       created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO templates (id, name, locale, subject_tpl, text_tpl, html_tpl,
+       created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
-        parsed.data.mailboxId,
         parsed.data.name,
         parsed.data.locale || "zh-CN",
         parsed.data.subjectTpl,
@@ -435,33 +444,42 @@ export function createApi(): Hono<AppEnv> {
     const mailboxId = c.req.query("mailboxId");
     const result = mailboxId
       ? await c.env.DB.prepare(
-          "SELECT * FROM rules WHERE mailbox_id = ? ORDER BY priority ASC, created_at ASC",
+          `SELECT r.* FROM rules r
+           JOIN rule_mailboxes rm ON rm.rule_id = r.id
+           WHERE rm.mailbox_id = ?
+           ORDER BY r.priority ASC, r.created_at ASC`,
         )
           .bind(mailboxId)
           .all()
       : await c.env.DB.prepare("SELECT * FROM rules ORDER BY created_at DESC LIMIT 200").all();
-    return c.json({ items: result.results || [] });
+    const items = await Promise.all(
+      (result.results || []).map(async (rule) => ({
+        ...rule,
+        mailboxIds: await getRuleMailboxIds(c.env, String((rule as { id: string }).id)),
+      })),
+    );
+    return c.json({ items });
   });
 
   api.post("/rules", async (c) => {
     if (!requireAdmin(c)) return forbidden(c);
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body.mailboxId !== "string") {
-      return c.json({ error: "mailbox_required" }, 400);
+    if (!body) return c.json({ error: "invalid_request" }, 400);
+    const mailboxIds = parseMailboxIds(body);
+    if (!mailboxIds) return c.json({ error: "mailbox_required" }, 400);
+    if (!(await mailboxesExist(c.env, mailboxIds))) {
+      return c.json({ error: "mailbox_not_found" }, 404);
     }
-    const mailbox = await getMailbox(c.env, body.mailboxId);
-    if (!mailbox) return c.json({ error: "mailbox_not_found" }, 404);
     const parsed = ruleInputSchema.safeParse(body);
     if (!parsed.success) return invalid(c, parsed.error.issues);
     const id = newId("rule");
     const timestamp = now();
     await c.env.DB.prepare(
-      `INSERT INTO rules (id, mailbox_id, name, priority, enabled, match_json, guards_json,
-       action_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO rules (id, name, priority, enabled, match_json, guards_json,
+       action_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
-        body.mailboxId,
         parsed.data.name,
         parsed.data.priority,
         parsed.data.enabled ? 1 : 0,
@@ -472,6 +490,7 @@ export function createApi(): Hono<AppEnv> {
         timestamp,
       )
       .run();
+    await replaceRuleMailboxes(c.env, id, mailboxIds);
     await audit(c.env, c.get("user").email, "rule.create", "rule", id);
     return c.json({ id }, 201);
   });
@@ -491,6 +510,24 @@ export function createApi(): Hono<AppEnv> {
     };
     const parsed = ruleInputSchema.safeParse(merged);
     if (!parsed.success) return invalid(c, parsed.error.issues);
+
+    if ("mailboxIds" in body || typeof body.mailboxId === "string") {
+      const mailboxIds = parseMailboxIds(body);
+      if (!mailboxIds) return c.json({ error: "mailbox_required" }, 400);
+      if (!(await mailboxesExist(c.env, mailboxIds))) {
+        return c.json({ error: "mailbox_not_found" }, 404);
+      }
+      await replaceRuleMailboxes(c.env, existing.id, mailboxIds);
+    }
+
+    const effectiveMailboxIds = await getRuleMailboxIds(c.env, existing.id);
+    if (parsed.data.enabled && effectiveMailboxIds.length === 0) {
+      return c.json(
+        { error: "mailbox_required", message: "启用规则前请先绑定至少一个邮箱" },
+        400,
+      );
+    }
+
     await c.env.DB.prepare(
       `UPDATE rules SET name = ?, priority = ?, enabled = ?, match_json = ?, guards_json = ?,
        action_json = ?, updated_at = ? WHERE id = ?`,
@@ -514,7 +551,10 @@ export function createApi(): Hono<AppEnv> {
     if (!requireAdmin(c)) return forbidden(c);
     const existing = await getRule(c.env, c.req.param("id"));
     if (!existing) return c.json({ error: "not_found" }, 404);
-    await c.env.DB.prepare("DELETE FROM rules WHERE id = ?").bind(existing.id).run();
+    await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM rule_mailboxes WHERE rule_id = ?").bind(existing.id),
+      c.env.DB.prepare("DELETE FROM rules WHERE id = ?").bind(existing.id),
+    ]);
     await audit(c.env, c.get("user").email, "rule.delete", "rule", existing.id);
     return c.json({ ok: true });
   });
@@ -602,10 +642,7 @@ export function createApi(): Hono<AppEnv> {
     let channel = message.channel_id
       ? await getOutboundChannelById(c.env, message.channel_id)
       : null;
-    if (!channel) {
-      const candidates = await resolveOutboundCandidates(c.env, mailbox);
-      channel = candidates.find((item) => item.kind !== "cf_reply") || null;
-    }
+    if (!channel) channel = await getOutboundChannel(c.env, mailbox.id);
     if (!channel || channel.kind === "cf_reply") {
       return c.json({ error: "no_outbound_channel" }, 400);
     }

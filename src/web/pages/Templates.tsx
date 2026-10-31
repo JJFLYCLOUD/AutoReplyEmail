@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { api } from "../api";
 import { useApi } from "../hooks";
-import type { Mailbox, Template } from "../types";
+import type { Template } from "../types";
 import {
   Badge,
   Button,
@@ -11,13 +11,11 @@ import {
   Field,
   Input,
   Modal,
-  Select,
   Spinner,
   Textarea,
 } from "../ui";
 
 interface TemplateForm {
-  mailboxId: string;
   name: string;
   locale: string;
   subjectTpl: string;
@@ -37,7 +35,6 @@ const DEFAULT_HTML = `<p>您好 {{sender_name}}：</p>
 <p>此致<br />{{mailbox_name}}</p>`;
 
 const emptyForm: TemplateForm = {
-  mailboxId: "",
   name: "",
   locale: "zh-CN",
   subjectTpl: "Re: {{subject}}",
@@ -47,7 +44,6 @@ const emptyForm: TemplateForm = {
 
 function formFromTemplate(template: Template): TemplateForm {
   return {
-    mailboxId: template.mailbox_id,
     name: template.name,
     locale: template.locale,
     subjectTpl: template.subject_tpl,
@@ -82,8 +78,6 @@ function simpleRender(value: string, vars: Record<string, string>): string {
 }
 
 export default function TemplatesPage() {
-  const mailboxes = useApi<{ items: Mailbox[] }>("/mailboxes");
-  const [filter, setFilter] = useState("");
   const templates = useApi<{ items: Template[] }>("/templates");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Template | null>(null);
@@ -93,12 +87,7 @@ export default function TemplatesPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ subject: string; text: string; html: string } | null>(null);
 
-  const mailboxList = mailboxes.data?.items || [];
-  const mailboxMap = useMemo(
-    () => new Map(mailboxList.map((item) => [item.id, item])),
-    [mailboxList],
-  );
-  const items = (templates.data?.items || []).filter((item) => !filter || item.mailbox_id === filter);
+  const items = templates.data?.items || [];
 
   function update<K extends keyof TemplateForm>(key: K, value: TemplateForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -106,7 +95,7 @@ export default function TemplatesPage() {
 
   function openCreate() {
     setEditing(null);
-    setForm({ ...emptyForm, mailboxId: filter || mailboxList[0]?.id || "" });
+    setForm(emptyForm);
     setFormError(null);
     setPreview(null);
     setOpen(true);
@@ -124,7 +113,6 @@ export default function TemplatesPage() {
     setSaving(true);
     setFormError(null);
     try {
-      if (!form.mailboxId) throw new Error("请选择邮箱");
       if (!form.name.trim()) throw new Error("请填写模板名称");
       if (!form.subjectTpl.trim()) throw new Error("请填写邮件主题");
       if (!form.textTpl.trim()) throw new Error("请填写纯文本正文");
@@ -138,7 +126,6 @@ export default function TemplatesPage() {
         });
       } else {
         await api.post("/templates", {
-          mailboxId: form.mailboxId,
           name: form.name,
           locale: form.locale,
           subjectTpl: form.subjectTpl,
@@ -197,19 +184,11 @@ export default function TemplatesPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Select className="w-52" value={filter} onChange={(event) => setFilter(event.target.value)}>
-            <option value="">全部邮箱</option>
-            {mailboxList.map((mailbox) => (
-              <option key={mailbox.id} value={mailbox.id}>
-                {mailbox.address}
-              </option>
-            ))}
-          </Select>
           <Button variant="outline" size="sm" onClick={templates.reload}>
             刷新
           </Button>
         </div>
-        <Button size="sm" onClick={openCreate} disabled={!mailboxList.length}>
+        <Button size="sm" onClick={openCreate}>
           新建模板
         </Button>
       </div>
@@ -221,12 +200,11 @@ export default function TemplatesPage() {
       ) : null}
       {templates.error ? <ErrorBox message={templates.error} /> : null}
       {templates.loading && !templates.data ? <Spinner /> : null}
-      {!mailboxes.loading && mailboxList.length === 0 ? <EmptyState title="请先添加邮箱" /> : null}
 
-      {!templates.loading && mailboxList.length > 0 && items.length === 0 ? (
+      {!templates.loading && items.length === 0 ? (
         <EmptyState
           title="还没有模板"
-          description="模板支持变量、条件块和多语言；规则命中后会渲染模板并发送。"
+          description="模板是全局的，所有邮箱的规则都可以使用。"
           action={<Button onClick={openCreate}>创建第一个模板</Button>}
         />
       ) : null}
@@ -239,9 +217,7 @@ export default function TemplatesPage() {
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-semibold text-slate-800">{template.name}</h3>
                   <Badge tone="indigo">{template.locale}</Badge>
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {mailboxMap.get(template.mailbox_id)?.address || template.mailbox_id}
+                  <Badge tone="green">全局</Badge>
                 </div>
               </div>
               <div className="flex gap-1">
@@ -287,21 +263,7 @@ export default function TemplatesPage() {
         <div className="space-y-4">
           {formError ? <ErrorBox message={formError} /> : null}
 
-          <div className="grid gap-3 sm:grid-cols-3">
-            <Field label="邮箱">
-              <Select
-                value={form.mailboxId}
-                onChange={(event) => update("mailboxId", event.target.value)}
-                disabled={Boolean(editing)}
-              >
-                <option value="">选择邮箱</option>
-                {mailboxList.map((mailbox) => (
-                  <option key={mailbox.id} value={mailbox.id}>
-                    {mailbox.address}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+          <div className="grid gap-3 sm:grid-cols-2">
             <Field label="模板名称">
               <Input
                 value={form.name}

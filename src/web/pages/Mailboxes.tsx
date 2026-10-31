@@ -23,7 +23,6 @@ interface MailboxForm {
   matchMode: "exact" | "domain";
   timezone: string;
   enabled: boolean;
-  replyVia: "auto" | "cf_reply" | "smtp" | "resend" | "mailgun";
   inboundKind: "cf_routing" | "imap" | "pop3";
   host: string;
   port: string;
@@ -53,7 +52,6 @@ const emptyForm: MailboxForm = {
   matchMode: "exact",
   timezone: "Asia/Shanghai",
   enabled: true,
-  replyVia: "auto",
   inboundKind: "cf_routing",
   host: "imap.gmail.com",
   port: "993",
@@ -79,10 +77,7 @@ const emptyForm: MailboxForm = {
 
 function formFromMailbox(mailbox: Mailbox): MailboxForm {
   const inbound = mailbox.inbound[0];
-  const outbound =
-    mailbox.outbound.find((channel) => channel.kind === mailbox.reply_via) ||
-    mailbox.outbound.find((channel) => channel.kind !== "cf_reply") ||
-    mailbox.outbound[0];
+  const outbound = mailbox.outbound[0];
   const inboundConfig = (inbound?.config || {}) as Record<string, unknown>;
   const outboundConfig = (outbound?.config || {}) as Record<string, unknown>;
   return {
@@ -92,7 +87,6 @@ function formFromMailbox(mailbox: Mailbox): MailboxForm {
     matchMode: mailbox.match_mode === "domain" ? "domain" : "exact",
     timezone: mailbox.timezone || "Asia/Shanghai",
     enabled: mailbox.enabled,
-    replyVia: (mailbox.reply_via as MailboxForm["replyVia"]) || "auto",
     inboundKind: (inbound?.kind as MailboxForm["inboundKind"]) || "cf_routing",
     host: String(inboundConfig.host || ""),
     port: String(inboundConfig.port || 993),
@@ -156,7 +150,6 @@ export default function MailboxesPage() {
         matchMode: form.matchMode,
         timezone: form.timezone,
         enabled: form.enabled,
-        replyVia: form.replyVia,
         inbound: {
           kind: form.inboundKind,
           host: form.host || undefined,
@@ -287,7 +280,6 @@ export default function MailboxesPage() {
                   <Badge tone={mailbox.enabled ? "green" : "slate"}>
                     {mailbox.enabled ? "启用" : "停用"}
                   </Badge>
-                  <Badge tone="indigo">{mailbox.reply_via}</Badge>
                   {mailbox.match_mode === "domain" ? <Badge tone="amber">整域匹配</Badge> : null}
                 </div>
                 <div className="mt-1 text-xs text-slate-500">
@@ -336,7 +328,7 @@ export default function MailboxesPage() {
                     : "未配置"}
                 </div>
                 <div className="mt-1 text-slate-400">
-                  规则 {mailbox.ruleCount} · 模板 {mailbox.templateCount}
+                  规则 {mailbox.ruleCount}
                 </div>
               </div>
             </div>
@@ -409,18 +401,6 @@ export default function MailboxesPage() {
                   onChange={(event) => update("timezone", event.target.value)}
                   placeholder="Asia/Shanghai"
                 />
-              </Field>
-              <Field label="默认发信方式">
-                <Select
-                  value={form.replyVia}
-                  onChange={(event) => update("replyVia", event.target.value as MailboxForm["replyVia"])}
-                >
-                  <option value="auto">自动（CF 优先）</option>
-                  <option value="cf_reply">Cloudflare 原生回复</option>
-                  <option value="smtp">SMTP</option>
-                  <option value="resend">Resend</option>
-                  <option value="mailgun">Mailgun</option>
-                </Select>
               </Field>
               <label className="flex items-center gap-2 pt-5 text-sm text-slate-700">
                 <input
@@ -523,10 +503,13 @@ export default function MailboxesPage() {
                 <option value="mailgun">Mailgun API</option>
               </Select>
             </Field>
+            <p className="text-[11px] text-slate-500">
+              该邮箱只使用这一种发信方式，失败不会自动切换。
+            </p>
 
             {form.outboundKind === "cf_reply" ? (
               <p className="text-[11px] leading-5 text-slate-500">
-                仅适用于 Cloudflare Email Routing 入站邮件。若需要延迟回复或跨域名发信，请再配置一个 SMTP/API 通道。
+                仅适用于 Cloudflare Email Routing 入站邮件；只能即时回复，失败不会切换其他通道。
               </p>
             ) : null}
 

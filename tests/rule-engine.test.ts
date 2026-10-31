@@ -92,3 +92,110 @@ describe("rule matching", () => {
     });
   });
 });
+
+describe("sender domain filter", () => {
+  const allow = (domains: string[], includeSubdomains = true) =>
+    matchesRule(
+      {
+        matchAll: true,
+        domainFilter: { mode: "allow", domains, includeSubdomains },
+      },
+      ctx,
+    );
+
+  const deny = (domains: string[], includeSubdomains = true) =>
+    matchesRule(
+      {
+        matchAll: true,
+        domainFilter: { mode: "deny", domains, includeSubdomains },
+      },
+      ctx,
+    );
+
+  it("allows an exact domain", () => {
+    expect(allow(["customer.com"])).toBe(true);
+    expect(allow(["example.com"])).toBe(false);
+  });
+
+  it("allows subdomains when enabled", () => {
+    const subdomainCtx = { ...ctx, from: "alice@mail.customer.com" };
+    expect(
+      matchesRule(
+        {
+          matchAll: true,
+          domainFilter: { mode: "allow", domains: ["customer.com"], includeSubdomains: true },
+        },
+        subdomainCtx,
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        {
+          matchAll: true,
+          domainFilter: { mode: "allow", domains: ["customer.com"], includeSubdomains: false },
+        },
+        subdomainCtx,
+      ),
+    ).toBe(false);
+  });
+
+  it("does not match lookalike domains", () => {
+    expect(allow(["customer.com"])).toBe(true);
+    expect(
+      matchesRule(
+        {
+          matchAll: true,
+          domainFilter: { mode: "allow", domains: ["customer.com"], includeSubdomains: true },
+        },
+        { ...ctx, from: "alice@notcustomer.com" },
+      ),
+    ).toBe(false);
+  });
+
+  it("denies listed domains", () => {
+    expect(deny(["customer.com"])).toBe(false);
+    expect(deny(["example.com"])).toBe(true);
+  });
+
+  it("fails closed when an allowlist is empty", () => {
+    expect(allow([])).toBe(false);
+    expect(deny([])).toBe(true);
+  });
+
+  it("normalizes @, *. and case", () => {
+    expect(allow(["@CUSTOMER.COM"])).toBe(true);
+    expect(allow(["*.Customer.com"])).toBe(true);
+  });
+
+  it("applies together with matchAll and keyword conditions", () => {
+    expect(
+      matchesRule(
+        {
+          matchAll: true,
+          domainFilter: { mode: "allow", domains: ["example.com"], includeSubdomains: true },
+        },
+        ctx,
+      ),
+    ).toBe(false);
+    expect(
+      matchesRule(
+        {
+          any: [{ field: "subject", op: "contains", value: "报价" }],
+          domainFilter: { mode: "deny", domains: ["customer.com"], includeSubdomains: true },
+        },
+        ctx,
+      ),
+    ).toBe(false);
+  });
+
+  it("parses domainFilter from stored JSON", () => {
+    const parsed = parseRuleMatch(
+      '{"matchAll":true,"domainFilter":{"mode":"allow","domains":["customer.com"],"includeSubdomains":false}}',
+    );
+    expect(parsed.domainFilter).toEqual({
+      mode: "allow",
+      domains: ["customer.com"],
+      includeSubdomains: false,
+    });
+  });
+});

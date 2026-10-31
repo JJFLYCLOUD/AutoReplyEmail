@@ -43,7 +43,6 @@ const mailbox = await call("/mailboxes", {
     matchMode: "exact",
     timezone: "Asia/Shanghai",
     enabled: true,
-    replyVia: "smtp",
     inbound: { kind: "cf_routing" },
     outbound: {
       kind: "smtp",
@@ -62,7 +61,6 @@ console.log("mailbox:", mailbox.mailbox.id);
 const template = await call("/templates", {
   method: "POST",
   body: {
-    mailboxId: mailbox.mailbox.id,
     name: "Smoke template",
     locale: "en",
     subjectTpl: "Re: {{subject}}",
@@ -75,7 +73,7 @@ console.log("template:", template.id);
 const rule = await call("/rules", {
   method: "POST",
   body: {
-    mailboxId: mailbox.mailbox.id,
+    mailboxIds: [mailbox.mailbox.id],
     name: "Price keyword",
     priority: 10,
     enabled: true,
@@ -85,7 +83,7 @@ const rule = await call("/rules", {
         { field: "body", op: "contains", value: "price" },
       ],
     },
-    guards: { cooldownHours: 24, maxPerThread: 1, maxPerDay: 50 },
+    guards: { cooldownHours: 24, maxPerThread: 1 },
     action: { type: "reply", templateId: template.id, ai: { mode: "off" }, delaySeconds: 0 },
   },
 });

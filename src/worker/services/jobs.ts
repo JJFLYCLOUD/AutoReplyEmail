@@ -3,11 +3,10 @@ import { newId, now } from "../lib/util";
 import type { Env, JobRow } from "../types";
 import {
   outboundMessageFrom,
-  resolveOutboundCandidates,
   sendViaChannel,
   type OutboundMessage,
 } from "../adapters/outbound";
-import { getMailbox, getOutboundChannelById, listOutboundChannels } from "./store";
+import { getMailbox, getOutboundChannel, getOutboundChannelById, listOutboundChannels } from "./store";
 import { insertOutboundMessage, recordSendLog, updateInboundStatus } from "./message-log";
 
 export interface SendJobPayload {
@@ -126,14 +125,14 @@ async function runSendJob(env: Env, payload: SendJobPayload): Promise<void> {
   const mailbox = await getMailbox(env, payload.mailboxId);
   if (!mailbox) throw new Error("邮箱不存在");
 
-  let channel = payload.channelId
+  const channel = payload.channelId
     ? await getOutboundChannelById(env, payload.channelId)
-    : null;
-  if (!channel) {
-    const candidates = await resolveOutboundCandidates(env, mailbox);
-    channel = candidates.find((item) => item.kind !== "cf_reply") || null;
-  }
+    : await getOutboundChannel(env, mailbox.id);
   if (!channel) throw new Error("没有可用的发信通道");
+  if (channel.status !== "active") throw new Error("发信通道已停用");
+  if (channel.kind === "cf_reply") {
+    throw new Error("cf_reply 只能即时回复 Cloudflare Email Routing 入站邮件");
+  }
 
   const message = outboundMessageFrom(mailbox, channel, {
     to: payload.message.to,

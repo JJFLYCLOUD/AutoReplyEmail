@@ -32,18 +32,15 @@ export interface Mailbox {
   match_mode: string;
   timezone: string;
   enabled: boolean;
-  reply_via: string;
   created_at: number;
   updated_at: number;
   inbound: Channel[];
   outbound: Channel[];
-  templateCount: number;
   ruleCount: number;
 }
 
 export interface Template {
   id: string;
-  mailbox_id: string;
   name: string;
   locale: string;
   subject_tpl: string;
@@ -55,7 +52,7 @@ export interface Template {
 
 export interface Rule {
   id: string;
-  mailbox_id: string;
+  mailboxIds: string[];
   name: string;
   priority: number;
   enabled: number;

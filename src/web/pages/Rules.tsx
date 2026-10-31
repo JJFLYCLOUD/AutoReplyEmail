@@ -17,7 +17,7 @@ import {
 } from "../ui";
 
 interface RuleForm {
-  mailboxId: string;
+  mailboxIds: string[];
   name: string;
   priority: string;
   enabled: boolean;
@@ -25,16 +25,18 @@ interface RuleForm {
   matchMode: "any" | "all";
   matchAll: boolean;
   advancedMatch: string;
+  domainMode: "off" | "allow" | "deny";
+  domains: string;
+  includeSubdomains: boolean;
   templateId: string;
   aiMode: "off" | "polish" | "classify";
   delaySeconds: string;
   cooldownHours: string;
   maxPerThread: string;
-  maxPerDay: string;
 }
 
 const emptyForm: RuleForm = {
-  mailboxId: "",
+  mailboxIds: [],
   name: "",
   priority: "100",
   enabled: true,
@@ -42,12 +44,14 @@ const emptyForm: RuleForm = {
   matchMode: "any",
   matchAll: false,
   advancedMatch: "",
+  domainMode: "off",
+  domains: "",
+  includeSubdomains: true,
   templateId: "",
   aiMode: "off",
   delaySeconds: "0",
   cooldownHours: "24",
   maxPerThread: "1",
-  maxPerDay: "50",
 };
 
 function parseKeywords(rule: Rule): string {
@@ -85,9 +89,14 @@ function formFromRule(rule: Rule): RuleForm {
     // ignore
   }
   const ai = (action.ai || {}) as { mode?: string };
+  const domainFilter = (match.domainFilter || {}) as {
+    mode?: string;
+    domains?: string[];
+    includeSubdomains?: boolean;
+  };
   return {
     ...emptyForm,
-    mailboxId: rule.mailbox_id,
+    mailboxIds: rule.mailboxIds || [],
     name: rule.name,
     priority: String(rule.priority),
     enabled: Boolean(rule.enabled),
@@ -95,12 +104,17 @@ function formFromRule(rule: Rule): RuleForm {
     matchMode: Array.isArray(match.any) ? "any" : "all",
     matchAll: Boolean(match.matchAll),
     advancedMatch: "",
+    domainMode:
+      domainFilter.mode === "allow" || domainFilter.mode === "deny"
+        ? domainFilter.mode
+        : "off",
+    domains: Array.isArray(domainFilter.domains) ? domainFilter.domains.join(", ") : "",
+    includeSubdomains: domainFilter.includeSubdomains !== false,
     templateId: String(action.templateId || ""),
     aiMode: (ai.mode as RuleForm["aiMode"]) || "off",
     delaySeconds: String(action.delaySeconds || 0),
     cooldownHours: String(guards.cooldownHours ?? 24),
     maxPerThread: String(guards.maxPerThread ?? 1),
-    maxPerDay: String(guards.maxPerDay ?? 50),
   };
 }
 
@@ -121,7 +135,6 @@ export default function RulesPage() {
 
   const mailboxList = mailboxes.data?.items || [];
   const templateList = templates.data?.items || [];
-  const selectedTemplates = templateList.filter((item) => item.mailbox_id === form.mailboxId);
   const mailboxMap = useMemo(
     () => new Map(mailboxList.map((item) => [item.id, item])),
     [mailboxList],
@@ -137,9 +150,15 @@ export default function RulesPage() {
 
   function openCreate() {
     setEditing(null);
-    const mailboxId = mailboxFilter || mailboxList[0]?.id || "";
-    const firstTemplate = templateList.find((item) => item.mailbox_id === mailboxId);
-    setForm({ ...emptyForm, mailboxId, templateId: firstTemplate?.id || "" });
+    setForm({
+      ...emptyForm,
+      mailboxIds: mailboxFilter
+        ? [mailboxFilter]
+        : mailboxList.length === 1
+          ? [mailboxList[0].id]
+          : [],
+      templateId: templateList[0]?.id || "",
+    });
     setFormError(null);
     setOpen(true);
   }
@@ -152,11 +171,31 @@ export default function RulesPage() {
   }
 
   function buildPayload() {
+    const domains = form.domains
+      .split(/[,，\n]/)
+      .map((item) =>
+        item
+          .trim()
+          .toLowerCase()
+          .replace(/^@/, "")
+          .replace(/^\*\./, "")
+          .replace(/\.$/, ""),
+      )
+      .filter(Boolean);
+    if (form.domainMode !== "off" && !domains.length) {
+      throw new Error("请填写发件人域名列表");
+    }
+    const domainFilter = {
+      mode: form.domainMode,
+      domains: [...new Set(domains)],
+      includeSubdomains: form.includeSubdomains,
+    };
+
     let match: Record<string, unknown> = {};
     if (form.advancedMatch.trim()) {
-      match = JSON.parse(form.advancedMatch);
+      match = { ...JSON.parse(form.advancedMatch), domainFilter };
     } else if (form.matchAll) {
-      match = { matchAll: true };
+      match = { matchAll: true, domainFilter };
     } else {
       const keywords = form.keywords
         .split(/[,，\n]/)
@@ -167,13 +206,14 @@ export default function RulesPage() {
         { field: "subject", op: "contains", value: keyword },
         { field: "body", op: "contains", value: keyword },
       ]);
-      match = form.matchMode === "any" ? { any: conditions } : { all: conditions };
+      match = form.matchMode === "any" ? { any: conditions, domainFilter } : { all: conditions, domainFilter };
     }
 
     if (!form.templateId) throw new Error("请选择回复模板");
+    if (!form.mailboxIds.length) throw new Error("请至少选择一个邮箱");
 
     return {
-      mailboxId: form.mailboxId,
+      mailboxIds: form.mailboxIds,
       name: form.name.trim(),
       priority: Number(form.priority) || 100,
       enabled: form.enabled,
@@ -181,7 +221,6 @@ export default function RulesPage() {
       guards: {
         cooldownHours: Number(form.cooldownHours) || 0,
         maxPerThread: Number(form.maxPerThread) || 1,
-        maxPerDay: Number(form.maxPerDay) || 50,
       },
       action: {
         type: "reply",
@@ -210,6 +249,10 @@ export default function RulesPage() {
   }
 
   async function toggle(rule: Rule) {
+    if (!rule.enabled && rule.mailboxIds.length === 0) {
+      alert("请先编辑规则并绑定至少一个邮箱，再启用。");
+      return;
+    }
     try {
       await api.patch(`/rules/${rule.id}`, { enabled: !rule.enabled });
       rules.reload();
@@ -262,7 +305,7 @@ export default function RulesPage() {
       {rules.loading && !rules.data ? <Spinner /> : null}
 
       {!mailboxes.loading && mailboxList.length === 0 ? (
-        <EmptyState title="请先添加邮箱" description="规则需要绑定到一个邮箱。" />
+        <EmptyState title="请先添加邮箱" description="规则需要绑定至少一个邮箱。" />
       ) : null}
 
       {!rules.loading && mailboxList.length > 0 && (rules.data?.items.length || 0) === 0 ? (
@@ -284,7 +327,20 @@ export default function RulesPage() {
               }
             })(),
           );
-          const mailbox = mailboxMap.get(rule.mailbox_id);
+          const mailboxNames = rule.mailboxIds.map(
+            (id) => mailboxMap.get(id)?.address || id,
+          );
+          let domainFilter: { mode?: string; domains?: string[] } = {};
+          try {
+            domainFilter = JSON.parse(rule.match_json || "{}").domainFilter || {};
+          } catch {
+            domainFilter = {};
+          }
+          const domainMode =
+            domainFilter.mode === "allow" || domainFilter.mode === "deny"
+              ? domainFilter.mode
+              : "off";
+          const domainList = Array.isArray(domainFilter.domains) ? domainFilter.domains : [];
           return (
             <Card key={rule.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
               <div className="min-w-0 flex-1">
@@ -295,9 +351,20 @@ export default function RulesPage() {
                   </Badge>
                   <Badge tone="indigo">优先级 {rule.priority}</Badge>
                   {template ? <Badge tone="blue">模板：{template.name}</Badge> : null}
+                  {domainMode !== "off" ? (
+                    <Badge tone={domainMode === "allow" ? "green" : "red"}>
+                      域名{domainMode === "allow" ? "白名单" : "黑名单"}：
+                      {domainList.slice(0, 2).join(", ")}
+                      {domainList.length > 2 ? "…" : ""}
+                    </Badge>
+                  ) : null}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
-                  <span>{mailbox?.address || rule.mailbox_id}</span>
+                  <span>
+                    {mailboxNames.length
+                      ? mailboxNames.join(", ")
+                      : "未绑定邮箱（已停用）"}
+                  </span>
                   <span className="truncate">关键词：{parseKeywords(rule) || "自定义 JSON"}</span>
                   <span>
                     AI：
@@ -345,28 +412,55 @@ export default function RulesPage() {
         <div className="space-y-4">
           {formError ? <ErrorBox message={formError} /> : null}
 
+          <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-slate-600">绑定邮箱（可多选）</span>
+              <div className="flex gap-2 text-[11px]">
+                <button
+                  type="button"
+                  className="text-indigo-600 hover:underline"
+                  onClick={() => update("mailboxIds", mailboxList.map((mailbox) => mailbox.id))}
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  className="text-slate-500 hover:underline"
+                  onClick={() => update("mailboxIds", [])}
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+            <div className="grid max-h-40 gap-1.5 overflow-y-auto sm:grid-cols-2">
+              {mailboxList.map((mailbox) => (
+                <label
+                  key={mailbox.id}
+                  className="flex items-center gap-2 rounded px-1.5 py-1 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={form.mailboxIds.includes(mailbox.id)}
+                    onChange={(event) =>
+                      update(
+                        "mailboxIds",
+                        event.target.checked
+                          ? [...form.mailboxIds, mailbox.id]
+                          : form.mailboxIds.filter((id) => id !== mailbox.id),
+                      )
+                    }
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  <span className="truncate">{mailbox.address}</span>
+                </label>
+              ))}
+            </div>
+            {!mailboxList.length ? (
+              <p className="text-[11px] text-amber-600">请先到“邮箱”页面添加邮箱。</p>
+            ) : null}
+          </div>
+
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="邮箱">
-              <Select
-                value={form.mailboxId}
-                onChange={(event) => {
-                  const mailboxId = event.target.value;
-                  const first = templateList.find((item) => item.mailbox_id === mailboxId);
-                  setForm((current) => ({
-                    ...current,
-                    mailboxId,
-                    templateId: first?.id || "",
-                  }));
-                }}
-              >
-                <option value="">选择邮箱</option>
-                {mailboxList.map((mailbox) => (
-                  <option key={mailbox.id} value={mailbox.id}>
-                    {mailbox.address}
-                  </option>
-                ))}
-              </Select>
-            </Field>
             <Field label="规则名称">
               <Input
                 value={form.name}
@@ -436,6 +530,50 @@ export default function RulesPage() {
           </section>
 
           <section className="space-y-3 rounded-lg border border-slate-200 p-3">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">发件人域名过滤</h4>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="模式">
+                <Select
+                  value={form.domainMode}
+                  onChange={(event) =>
+                    update("domainMode", event.target.value as RuleForm["domainMode"])
+                  }
+                >
+                  <option value="off">不限制</option>
+                  <option value="allow">白名单：只允许列表域名</option>
+                  <option value="deny">黑名单：排除列表域名</option>
+                </Select>
+              </Field>
+              <label className="flex items-center gap-2 pt-5 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={form.includeSubdomains}
+                  onChange={(event) => update("includeSubdomains", event.target.checked)}
+                  disabled={form.domainMode === "off"}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                包含子域名
+              </label>
+            </div>
+            {form.domainMode !== "off" ? (
+              <Field
+                label="域名列表"
+                hint="用逗号或换行分隔，例如 example.com, customer.cn；会自动去掉 @ 和 *. 前缀"
+              >
+                <Textarea
+                  rows={3}
+                  value={form.domains}
+                  onChange={(event) => update("domains", event.target.value)}
+                  placeholder="example.com&#10;customer.cn"
+                />
+              </Field>
+            ) : null}
+            <p className="text-[11px] leading-5 text-slate-500">
+              域名过滤只影响当前规则。需要全局拉黑时，请使用「设置 → 抑制名单」。
+            </p>
+          </section>
+
+          <section className="space-y-3 rounded-lg border border-slate-200 p-3">
             <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">回复动作</h4>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="使用模板">
@@ -444,7 +582,7 @@ export default function RulesPage() {
                   onChange={(event) => update("templateId", event.target.value)}
                 >
                   <option value="">选择模板</option>
-                  {selectedTemplates.map((template) => (
+                  {templateList.map((template) => (
                     <option key={template.id} value={template.id}>
                       {template.name}（{template.locale}）
                     </option>
@@ -461,7 +599,7 @@ export default function RulesPage() {
                   <option value="classify">AI 选择模板</option>
                 </Select>
               </Field>
-              <Field label="延迟发送（秒）" hint="Cloudflare 原生回复只能即时发送；延迟需配置 SMTP/API">
+              <Field label="延迟发送（秒）" hint="Cloudflare 原生回复不支持延迟；SMTP/API 通道可以延迟">
                 <Input
                   value={form.delaySeconds}
                   onChange={(event) => update("delaySeconds", event.target.value)}
@@ -479,16 +617,10 @@ export default function RulesPage() {
                   onChange={(event) => update("maxPerThread", event.target.value)}
                 />
               </Field>
-              <Field label="每日最多回复次数">
-                <Input
-                  value={form.maxPerDay}
-                  onChange={(event) => update("maxPerDay", event.target.value)}
-                />
-              </Field>
             </div>
-            {!selectedTemplates.length ? (
+            {!templateList.length ? (
               <p className="text-[11px] text-amber-600">
-                该邮箱还没有模板，请先到“模板”页面创建。
+                还没有模板，请先到“模板”页面创建。
               </p>
             ) : null}
           </section>

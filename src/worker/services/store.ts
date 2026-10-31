@@ -43,7 +43,6 @@ export interface MailboxInput {
   matchMode?: "exact" | "domain";
   timezone?: string;
   enabled?: boolean;
-  replyVia?: string;
   inbound?: InboundInput | null;
   outbound?: OutboundInput | null;
 }
@@ -112,7 +111,7 @@ export async function saveMailbox(
   if (existing) {
     await env.DB.prepare(
       `UPDATE mailboxes SET address = ?, display_name = ?, domain = ?, match_mode = ?,
-       timezone = ?, enabled = ?, reply_via = ?, updated_at = ? WHERE id = ?`,
+       timezone = ?, enabled = ?, updated_at = ? WHERE id = ?`,
     )
       .bind(
         address,
@@ -121,7 +120,6 @@ export async function saveMailbox(
         input.matchMode ?? existing.match_mode,
         input.timezone ?? existing.timezone,
         input.enabled === undefined ? existing.enabled : input.enabled ? 1 : 0,
-        input.replyVia ?? existing.reply_via,
         timestamp,
         mailboxId,
       )
@@ -129,8 +127,8 @@ export async function saveMailbox(
   } else {
     await env.DB.prepare(
       `INSERT INTO mailboxes (id, address, display_name, domain, match_mode, timezone,
-       enabled, reply_via, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         mailboxId,
@@ -140,7 +138,6 @@ export async function saveMailbox(
         input.matchMode || "exact",
         input.timezone || "UTC",
         input.enabled === false ? 0 : 1,
-        input.replyVia || "auto",
         timestamp,
         timestamp,
       )
@@ -155,7 +152,14 @@ export async function saveMailbox(
       .bind(mailboxId, input.inbound.kind)
       .run();
   }
-  if (input.outbound) await upsertOutboundChannel(env, mailboxId, input.outbound);
+  if (input.outbound) {
+    await upsertOutboundChannel(env, mailboxId, input.outbound);
+    await env.DB.prepare(
+      "DELETE FROM outbound_channels WHERE mailbox_id = ? AND kind != ?",
+    )
+      .bind(mailboxId, input.outbound.kind)
+      .run();
+  }
 
   const saved = await getMailbox(env, mailboxId);
   if (!saved) throw new Error("邮箱保存失败");
@@ -187,8 +191,11 @@ export async function deleteMailbox(env: Env, id: string): Promise<void> {
       "DELETE FROM send_log WHERE message_id IN (SELECT id FROM messages WHERE mailbox_id = ?)",
     ).bind(id),
     env.DB.prepare("DELETE FROM messages WHERE mailbox_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM rules WHERE mailbox_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM templates WHERE mailbox_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM rule_mailboxes WHERE mailbox_id = ?").bind(id),
+    env.DB.prepare(
+      `UPDATE rules SET enabled = 0, updated_at = ?
+       WHERE enabled = 1 AND id NOT IN (SELECT rule_id FROM rule_mailboxes)`,
+    ).bind(now()),
     env.DB.prepare("DELETE FROM inbound_channels WHERE mailbox_id = ?").bind(id),
     env.DB.prepare("DELETE FROM outbound_channels WHERE mailbox_id = ?").bind(id),
     env.DB.prepare("DELETE FROM suppressions WHERE mailbox_id = ?").bind(id),
@@ -437,12 +444,10 @@ export async function decryptChannelSecret(
   );
 }
 
-export async function listTemplates(env: Env, mailboxId: string): Promise<TemplateRow[]> {
+export async function listTemplates(env: Env): Promise<TemplateRow[]> {
   const result = await env.DB.prepare(
-    "SELECT * FROM templates WHERE mailbox_id = ? ORDER BY created_at ASC",
-  )
-    .bind(mailboxId)
-    .all<TemplateRow>();
+    "SELECT * FROM templates ORDER BY created_at ASC",
+  ).all<TemplateRow>();
   return result.results || [];
 }
 
@@ -452,7 +457,10 @@ export async function getTemplate(env: Env, id: string): Promise<TemplateRow | n
 
 export async function listRules(env: Env, mailboxId: string): Promise<RuleRow[]> {
   const result = await env.DB.prepare(
-    "SELECT * FROM rules WHERE mailbox_id = ? AND enabled = 1 ORDER BY priority ASC, created_at ASC",
+    `SELECT r.* FROM rules r
+     JOIN rule_mailboxes rm ON rm.rule_id = r.id
+     WHERE rm.mailbox_id = ? AND r.enabled = 1
+     ORDER BY r.priority ASC, r.created_at ASC`,
   )
     .bind(mailboxId)
     .all<RuleRow>();
@@ -461,6 +469,31 @@ export async function listRules(env: Env, mailboxId: string): Promise<RuleRow[]>
 
 export async function getRule(env: Env, id: string): Promise<RuleRow | null> {
   return await env.DB.prepare("SELECT * FROM rules WHERE id = ?").bind(id).first<RuleRow>();
+}
+
+export async function getRuleMailboxIds(env: Env, ruleId: string): Promise<string[]> {
+  const result = await env.DB.prepare(
+    "SELECT mailbox_id FROM rule_mailboxes WHERE rule_id = ? ORDER BY mailbox_id",
+  )
+    .bind(ruleId)
+    .all<{ mailbox_id: string }>();
+  return (result.results || []).map((row) => row.mailbox_id);
+}
+
+export async function replaceRuleMailboxes(
+  env: Env,
+  ruleId: string,
+  mailboxIds: string[],
+): Promise<void> {
+  const statements = [
+    env.DB.prepare("DELETE FROM rule_mailboxes WHERE rule_id = ?").bind(ruleId),
+    ...mailboxIds.map((mailboxId) =>
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO rule_mailboxes (rule_id, mailbox_id) VALUES (?, ?)",
+      ).bind(ruleId, mailboxId),
+    ),
+  ];
+  await env.DB.batch(statements);
 }
 
 export async function logAudit(

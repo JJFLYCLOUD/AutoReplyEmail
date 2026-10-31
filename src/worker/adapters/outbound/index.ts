@@ -1,6 +1,6 @@
 import { parseJson } from "../../lib/util";
 import type { Env, MailboxRow, OutboundChannelRow } from "../../types";
-import { decryptChannelSecret, listOutboundChannels } from "../../services/store";
+import { decryptChannelSecret } from "../../services/store";
 import { sendCfReply } from "./cf-reply";
 import { sendMailgun, type MailgunConfig } from "./mailgun";
 import { sendResend } from "./resend";
@@ -31,24 +31,6 @@ export async function sendViaChannel(
     default:
       throw new Error(`不支持的发信通道: ${channel.kind}`);
   }
-}
-
-const KIND_ORDER = ["cf_reply", "smtp", "resend", "mailgun"];
-
-export async function resolveOutboundCandidates(
-  env: Env,
-  mailbox: MailboxRow,
-): Promise<OutboundChannelRow[]> {
-  const channels = (await listOutboundChannels(env, mailbox.id)).filter(
-    (channel) => channel.status === "active",
-  );
-  const preferred = mailbox.reply_via;
-  return channels.sort((a, b) => {
-    const aPreferred = a.kind === preferred ? 0 : 1;
-    const bPreferred = b.kind === preferred ? 0 : 1;
-    if (aPreferred !== bPreferred) return aPreferred - bPreferred;
-    return KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind);
-  });
 }
 
 export function outboundMessageFrom(
