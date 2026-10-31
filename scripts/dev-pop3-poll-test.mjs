@@ -2,12 +2,14 @@
  * Full POP3 poll test against scripts/fake-pop3.mjs (port 21025).
  * Usage: node scripts/dev-pop3-poll-test.mjs
  */
+import { login } from "./dev-auth.mjs";
+
 const BASE = process.env.BASE_URL || "http://127.0.0.1:8787";
-const USER = process.env.DEV_USER || "dev@example.com";
+const COOKIE = await login(BASE);
 
 async function call(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  headers.set("X-Dev-User", USER);
+  headers.set("Cookie", COOKIE);
   if (options.body) headers.set("content-type", "application/json");
   const response = await fetch(`${BASE}/api${path}`, {
     ...options,

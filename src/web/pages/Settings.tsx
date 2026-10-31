@@ -372,22 +372,20 @@ export default function SettingsPage() {
           <h2 className="text-sm font-semibold text-slate-800">安全与登录</h2>
           <div className="mt-3 space-y-2 text-xs text-slate-600">
             <div className="flex items-center justify-between">
-              <span>Cloudflare Access</span>
-              <Badge tone={me.data?.access.configured ? "green" : "amber"}>
-                {me.data?.access.configured ? "已配置" : "未配置"}
-              </Badge>
+              <span>登录方式</span>
+              <Badge tone="green">账号密码</Badge>
             </div>
             <div className="flex items-center justify-between">
-              <span>Team Domain</span>
+              <span>登录账号</span>
               <span className="font-mono text-slate-500">
-                {me.data?.access.teamDomain || "-"}
+                {me.data?.auth.username || "-"}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span>运行模式</span>
-              <Badge tone={me.data?.access.devMode ? "amber" : "green"}>
-                {me.data?.access.devMode ? "development" : "production"}
-              </Badge>
+              <span>会话有效期</span>
+              <span className="text-slate-500">
+                {me.data?.auth.sessionHours ?? 12} 小时
+              </span>
             </div>
             <div className="flex items-center justify-between">
               <span>凭据加密</span>
@@ -395,8 +393,8 @@ export default function SettingsPage() {
             </div>
           </div>
           <p className="mt-3 text-[11px] leading-5 text-slate-400">
-            生产环境请用 Cloudflare Access 保护整个管理后台域名与 <code>/api/*</code>；
-            本应用会校验 <code>Cf-Access-Jwt-Assertion</code>。
+            账号密码由 Worker 变量 <code>AUTH_USERNAME</code> / <code>AUTH_PASSWORD</code> 控制；
+            修改 <code>AUTH_PASSWORD</code> 会使已有会话失效。
           </p>
         </Card>
 

@@ -126,10 +126,11 @@ export interface Settings {
 export interface MeResponse {
   user: User;
   settings: Settings;
-  access: {
-    teamDomain: string;
+  auth: {
+    mode: string;
+    username: string;
+    sessionHours: number;
     configured: boolean;
-    devMode: boolean;
   };
 }
 

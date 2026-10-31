@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { ApiError, api, getDevUser, setDevUser } from "./api";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ApiError, api } from "./api";
 import type { MeResponse } from "./types";
 import { Badge, Button, Input, Spinner } from "./ui";
 import DashboardPage from "./pages/Dashboard";
@@ -53,6 +53,25 @@ export default function App() {
     void loadMe();
   }, [loadMe]);
 
+  useEffect(() => {
+    const onExpired = () => {
+      setMe(null);
+      setError("会话已过期，请重新登录");
+    };
+    window.addEventListener("auth:expired", onExpired);
+    return () => window.removeEventListener("auth:expired", onExpired);
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await api.post("/auth/logout");
+    } catch {
+      // ignore
+    }
+    setMe(null);
+    setError(null);
+  }, []);
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -97,9 +116,14 @@ export default function App() {
         </nav>
         <div className="border-t border-slate-100 p-4 text-[11px] leading-5 text-slate-400">
           <div className="truncate">{me.user.email}</div>
-          <div>
-            {me.access.configured ? "Cloudflare Access 已启用" : me.access.devMode ? "本地开发模式" : "Access 未配置"}
-          </div>
+          <div>账号密码登录</div>
+          <button
+            type="button"
+            onClick={() => void handleLogout()}
+            className="mt-1 text-slate-500 underline underline-offset-2 hover:text-slate-700"
+          >
+            退出登录
+          </button>
         </div>
       </aside>
 
@@ -150,7 +174,24 @@ export default function App() {
 }
 
 function LoginScreen({ message, onDone }: { message: string; onDone: () => void }) {
-  const [email, setEmail] = useState(getDevUser());
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post("/auth/login", { username: username.trim(), password });
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
@@ -166,32 +207,50 @@ function LoginScreen({ message, onDone }: { message: string; onDone: () => void 
         </div>
 
         <div className="space-y-2 text-sm text-slate-600">
-          <p className="font-medium text-slate-800">未通过 Cloudflare Access 验证</p>
+          <p className="font-medium text-slate-800">登录管理后台</p>
           <p className="text-xs leading-5 text-slate-500">{message}</p>
         </div>
 
-        <div className="mt-5 space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
-          <p className="text-xs font-medium text-amber-800">本地开发登录</p>
-          <p className="text-[11px] leading-4 text-amber-700">
-            仅在 ENVIRONMENT=development 时有效。生产环境请通过 Cloudflare Access 访问本页面。
-          </p>
-          <div className="flex gap-2">
+        <form className="mt-5 space-y-3" onSubmit={(event) => void submit(event)}>
+          <label className="block space-y-1.5">
+            <span className="text-xs font-medium text-slate-600">账号</span>
             <Input
-              placeholder="you@example.com"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="admin"
+              autoFocus
             />
-            <Button
-              onClick={() => {
-                setDevUser(email.trim());
-                onDone();
-              }}
-              disabled={!email.trim()}
-            >
-              进入
-            </Button>
-          </div>
-        </div>
+          </label>
+          <label className="block space-y-1.5">
+            <span className="text-xs font-medium text-slate-600">密码</span>
+            <Input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="••••••••"
+            />
+          </label>
+
+          {error ? (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+              {error}
+            </div>
+          ) : null}
+
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={submitting || !username.trim() || !password}
+          >
+            {submitting ? "登录中…" : "登录"}
+          </Button>
+        </form>
+
+        <p className="mt-4 text-[11px] leading-4 text-slate-400">
+          账号密码由 Worker 变量 AUTH_USERNAME、AUTH_PASSWORD 控制。
+        </p>
       </div>
     </div>
   );

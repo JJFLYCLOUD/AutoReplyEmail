@@ -50,6 +50,11 @@ export async function runCleanup(env: Env): Promise<void> {
     .bind(timestamp - 365 * 86400_000)
     .run();
   await env.DB.prepare(
+    "DELETE FROM login_attempts WHERE reset_at < ?",
+  )
+    .bind(timestamp)
+    .run();
+  await env.DB.prepare(
     "DELETE FROM reply_ledger WHERE replied_at < ?",
   )
     .bind(timestamp - 365 * 86400_000)

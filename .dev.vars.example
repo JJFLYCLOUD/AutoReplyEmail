@@ -1,8 +1,15 @@
 # Copy to .dev.vars for local development.
-# Generate with: openssl rand -base64 32
+
+# Used to encrypt mailbox SMTP / IMAP / API credentials.
+# Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 CREDENTIAL_KEY=replace-with-32-byte-base64-key
-BOOTSTRAP_ADMIN_EMAIL=you@example.com
+
+# Admin account used by the login page.
+AUTH_USERNAME=admin
+AUTH_PASSWORD=change-me-to-a-long-random-password
+
+# Used to sign session cookies. Changing it logs everyone out.
+AUTH_SESSION_SECRET=replace-with-32-byte-base64-session-secret
+AUTH_SESSION_HOURS=12
+
 ENVIRONMENT=development
-DEV_AUTH_EMAIL=you@example.com
-# ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com
-# ACCESS_AUD=your-access-application-aud

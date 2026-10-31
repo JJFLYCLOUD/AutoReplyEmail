@@ -16,7 +16,7 @@ import {
   publicChannel,
   saveMailbox,
 } from "../services/store";
-import { requireAdmin } from "../services/auth";
+import { requireAdmin, handleLogin, handleLogout, getAuthConfig, isAuthConfigured } from "../services/auth";
 import { ruleInputSchema } from "../services/rule-engine";
 import { matchesRule, parseRuleMatch, parseRuleGuards } from "../services/rule-engine";
 import { evaluateStaticGuards, mergeGuardOptions } from "../services/guard";
@@ -136,16 +136,21 @@ async function audit(
 export function createApi(): Hono<AppEnv> {
   const api = new Hono<AppEnv>();
 
+  api.post("/auth/login", handleLogin);
+  api.post("/auth/logout", handleLogout);
+
   api.get("/me", async (c) => {
     const user = c.get("user");
     const settings = await loadSettings(c.env);
+    const auth = getAuthConfig(c.env);
     return c.json({
       user,
       settings: toPublicSettings(settings),
-      access: {
-        teamDomain: c.env.ACCESS_TEAM_DOMAIN || "",
-        configured: Boolean(c.env.ACCESS_TEAM_DOMAIN && c.env.ACCESS_AUD),
-        devMode: c.env.ENVIRONMENT !== "production",
+      auth: {
+        mode: "password",
+        username: auth.username,
+        sessionHours: auth.sessionHours,
+        configured: isAuthConfigured(c.env),
       },
     });
   });

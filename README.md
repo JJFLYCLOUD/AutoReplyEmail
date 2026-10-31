@@ -2,7 +2,7 @@
 
 基于 **Cloudflare Workers 免费版** 的多邮箱自动回复系统。
 
-支持 Cloudflare Email Routing、IMAP / POP3 收信，SMTP / Resend / Mailgun 发信；按关键词匹配模板，可选 AI 润色或 AI 分类；管理后台通过 **Cloudflare Access** 登录。
+支持 Cloudflare Email Routing、IMAP / POP3 收信，SMTP / Resend / Mailgun 发信；按关键词匹配模板，可选 AI 润色或 AI 分类；管理后台使用**账号密码登录**，账号密码由 Worker 变量控制。
 
 适合个人或小团队自建多邮箱自动回复，不依赖第三方 SaaS。
 
@@ -21,7 +21,7 @@
 - **AI 回复**：Workers AI 或 OpenAI 兼容 API；支持 AI 润色、AI 选择模板、失败回退模板。
 - **防循环**：RFC 3834、Auto-Submitted、Precedence、List-Id、退信、References 上限、发件人冷却、线程上限、抑制名单。
 - **可观测**：收发日志、原始 `.eml`、任务队列、重试、审计日志。
-- **安全**：凭据 AES-256-GCM 加密、Cloudflare Access JWT 校验、Origin 校验、敏感字段不回传。
+- **安全**：账号密码登录、HttpOnly 会话 Cookie、凭据 AES-256-GCM 加密、Origin 校验、敏感字段不回传。
 
 ---
 
@@ -29,7 +29,7 @@
 
 ```text
 Browser ──► Worker fetch（Hono API + React 静态资源）
-                │  ▲ Cloudflare Access
+                │  ▲ 账号密码会话 Cookie
                 ▼
               D1（配置 / 日志 / 任务）
                 ▲
@@ -47,7 +47,7 @@ Cron（每分钟）─► Worker scheduled ─┬─ 消费发送任务
 - React 19 + Vite + Tailwind CSS
 - D1 + R2
 - `postal-mime` / `mimetext` / `worker-mailer`
-- Cloudflare Access + `jose`
+- `jose`（会话 JWT）
 - Vitest
 
 ---
@@ -121,9 +121,9 @@ Dashboard → **Workers & Pages** → **Create application** → **Workers** →
 > npx wrangler d1 migrations apply auto-reply-db --remote
 > ```
 >
-> 或者在 D1 → **Console** 依次执行 `migrations/` 下的三个 SQL 文件。
+> 或者在 D1 → **Console** 依次执行 `migrations/` 下的 SQL 文件。
 
-### 5. 绑定自定义域名
+### 5. 绑定自定义域名（可选）
 
 Worker → **Settings** → **Domains & Routes** → **Add** → **Custom domain**
 
@@ -133,43 +133,32 @@ Worker → **Settings** → **Domains & Routes** → **Add** → **Custom domain
 auto-reply.example.com
 ```
 
-> `workers.dev` 不能使用 Cloudflare Access，管理后台必须使用自定义域名。
+> 不绑定自定义域名也可以使用 `https://auto-reply-email.<你的子域>.workers.dev` 登录。  
+> 但 Email Routing 仍然需要一个托管在 Cloudflare 的域名。
 
-### 6. 创建 Cloudflare Access
-
-Zero Trust → **Access** → **Applications** → **Add an application** → **Self-hosted**
-
-- Domain：`auto-reply.example.com`
-- Path：`/*`
-- Policy：Allow → Emails → 你的邮箱（或 One-time PIN / Google / GitHub）
-
-记录：
-
-- 应用 Overview 里的 **Application Audience (AUD)**
-- Zero Trust → Settings 里的 **Team domain**，例如 `yourteam.cloudflareaccess.com`
-
-### 7. 设置变量与密钥
+### 6. 设置登录变量与密钥
 
 Worker → **Settings** → **Variables and Secrets**，添加：
 
 | 名称 | 类型 | 说明 |
 |---|---|---|
+| `AUTH_USERNAME` | Var | 登录账号，例如 `admin` |
+| `AUTH_PASSWORD` | **Secret** | 登录密码，建议 24 位以上随机字符串 |
+| `AUTH_SESSION_SECRET` | **Secret** | 会话签名密钥，32 字节随机 Base64 |
+| `AUTH_SESSION_HOURS` | Var（可选） | 登录有效期，默认 `12` |
 | `CREDENTIAL_KEY` | Secret | 32 字节随机 Base64，用于加密邮箱凭据 |
-| `BOOTSTRAP_ADMIN_EMAIL` | Secret / Var | 你的 Access 登录邮箱 |
-| `ACCESS_TEAM_DOMAIN` | Var | `yourteam.cloudflareaccess.com` |
-| `ACCESS_AUD` | Var | 上一步复制的 AUD |
 
-生成密钥：
+生成两个随机密钥：
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-> 生产环境不要设置 `DEV_AUTH_EMAIL`。  
-> `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` 已从 `wrangler.jsonc` 移除，避免部署时被空值覆盖；请在 Dashboard 配置，保存后立即生效。  
+> `AUTH_PASSWORD` 一定要用 Secret，不要用普通 Var。  
+> 修改 `AUTH_PASSWORD` 会使已有会话失效；修改 `AUTH_SESSION_SECRET` 会让所有人退出登录。  
 > `CREDENTIAL_KEY` 更换后，之前保存的邮箱密码将无法解密。
 
-### 8. 开启 Email Routing
+### 7. 开启 Email Routing
 
 Dashboard → **Email** → **Email Routing** → 启用域名
 
@@ -188,10 +177,10 @@ support@example.com  →  Send to a Worker → auto-reply-email
 ⚠️ 如果域名的 MX 已经指向 Google Workspace / Microsoft 365 / 其他邮件服务，直接启用 Email Routing 会替换 MX，导致原有邮箱收不到信。  
 这种情况请使用子域，例如 `reply.example.com`，邮箱地址使用 `support@reply.example.com`。
 
-### 9. 首次使用
+### 8. 首次使用
 
-1. 打开 `https://auto-reply.example.com`
-2. 通过 Cloudflare Access 登录
+1. 打开 `https://auto-reply.example.com` 或 `https://auto-reply-email.<子域>.workers.dev`
+2. 输入 `AUTH_USERNAME` / `AUTH_PASSWORD` 登录
 3. 添加邮箱：
    - **Cloudflare 域名邮箱**：入站 Cloudflare Email Routing，发信 Cloudflare 原生回复
    - **Gmail**：IMAP `imap.gmail.com:993` + SMTP `smtp.gmail.com:465`，使用应用专用密码
@@ -212,11 +201,16 @@ cp .dev.vars.example .dev.vars
 编辑 `.dev.vars`：
 
 ```dotenv
-CREDENTIAL_KEY=<openssl rand -base64 32>
-BOOTSTRAP_ADMIN_EMAIL=you@example.com
+CREDENTIAL_KEY=<32 字节随机 Base64>
+AUTH_USERNAME=admin
+AUTH_PASSWORD=dev-password
+AUTH_SESSION_SECRET=<32 字节随机 Base64>
+AUTH_SESSION_HOURS=12
 ENVIRONMENT=development
-DEV_AUTH_EMAIL=you@example.com
 ```
+
+> 本地默认账号是 `admin`，密码是 `dev-password`（仅用于开发）。  
+> 修改 `AUTH_PASSWORD` 后需要重新登录。
 
 ### 2. 初始化本地 D1
 
@@ -232,7 +226,7 @@ npm run dev
 
 - 管理后台：<http://localhost:5173>
 - Worker API：<http://127.0.0.1:8787>
-- 本地登录：使用 `DEV_AUTH_EMAIL`，或页面上的开发登录输入框
+- 本地登录：使用 `.dev.vars` 中的 `AUTH_USERNAME` / `AUTH_PASSWORD`
 
 > Workers AI binding 在本地 `wrangler dev` 默认不可用；AI 功能建议部署后验证。关键词 + 模板回复可以完整本地测试。
 
@@ -251,6 +245,7 @@ npm run build
 ```bash
 node scripts/dev-smoke.mjs
 node scripts/dev-pipeline-test.mjs
+node scripts/dev-auth-test.mjs
 ```
 
 IMAP / POP3 客户端可以用内置假服务器验证（假服务器会占用终端，请另开终端执行测试脚本）：
@@ -379,14 +374,23 @@ wrangler.jsonc
 
 数据库表：
 
-`users`、`mailboxes`、`inbound_channels`、`outbound_channels`、`rules`、`templates`、`messages`、`send_log`、`reply_ledger`、`suppressions`、`jobs`、`ai_usage`、`pop3_seen`、`audit_log`、`settings`。
+`users`（预留多账号）、`mailboxes`、`inbound_channels`、`outbound_channels`、`rules`、`templates`、`messages`、`send_log`、`reply_ledger`、`suppressions`、`jobs`、`ai_usage`、`pop3_seen`、`login_attempts`、`audit_log`、`settings`。
 
 ---
 
 ## 常见问题
 
 **Q：部署后打开页面，/api 全部 401？**  
-检查 Worker 变量 `ACCESS_TEAM_DOMAIN` 和 `ACCESS_AUD` 是否已配置，且 AUD 与 Access 应用一致。`workers.dev` 不支持 Access，请使用自定义域名。
+先确认已经登录，或者会话没有过期。如果登录页提示“服务端未配置登录账号”，请在 Worker Settings 配置 `AUTH_USERNAME`、`AUTH_PASSWORD`、`AUTH_SESSION_SECRET`。
+
+**Q：登录提示“账号或密码错误”？**  
+检查 Worker 变量 `AUTH_USERNAME` 和 Secret `AUTH_PASSWORD`。账号区分大小写；修改密码后旧会话会失效。
+
+**Q：忘记密码怎么办？**  
+在 Worker Settings 修改 `AUTH_PASSWORD`，保存后立即生效，旧会话全部失效。密码建议使用 24 位以上随机字符串。
+
+**Q：登录提示“尝试次数过多”？**  
+同一 IP 在 15 分钟内失败 5 次会触发限流。等待窗口结束后重试，或清除 D1 表 `login_attempts` 中对应记录。
 
 **Q：报 `D1_ERROR: no such table`？**  
 数据库迁移没有执行。运行 `npx wrangler d1 migrations apply auto-reply-db --remote`，或使用部署命令中的迁移步骤。
@@ -424,7 +428,6 @@ CF 原生回复只能即时；IMAP / SMTP / API 通道支持规则里的 `delayS
 
 - Workers Free：100,000 请求/天，10ms CPU
 - D1 / R2：免费额度内
-- Cloudflare Access：免费 ≤50 用户
 - Email Routing：入站免费
 - Workers AI：免费额度（按 Neurons）
 - Workers Builds：每月构建额度，具体以控制台为准

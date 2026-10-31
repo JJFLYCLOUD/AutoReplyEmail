@@ -5,13 +5,13 @@ export interface Env {
   ASSETS?: Fetcher;
   ENVIRONMENT?: string;
   APP_NAME?: string;
-  ACCESS_TEAM_DOMAIN?: string;
-  ACCESS_AUD?: string;
-  DEV_AUTH_EMAIL?: string;
+  AUTH_USERNAME?: string;
+  AUTH_PASSWORD?: string;
+  AUTH_SESSION_SECRET?: string;
+  AUTH_SESSION_HOURS?: string;
   CREDENTIAL_KEY?: string;
   DEFAULT_AI_MODEL?: string;
   RAW_RETENTION_DAYS?: string;
-  BOOTSTRAP_ADMIN_EMAIL?: string;
 }
 
 export interface AiBinding {

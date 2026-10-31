@@ -3,12 +3,14 @@
  * Usage: node scripts/dev-smoke.mjs
  * Requires ENVIRONMENT=development and a dev user header.
  */
+import { login } from "./dev-auth.mjs";
+
 const BASE = process.env.BASE_URL || "http://127.0.0.1:8787";
-const USER = process.env.DEV_USER || "dev@example.com";
+const COOKIE = await login(BASE);
 
 async function call(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  headers.set("X-Dev-User", USER);
+  headers.set("Cookie", COOKIE);
   if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   const response = await fetch(`${BASE}/api${path}`, {
     ...options,
