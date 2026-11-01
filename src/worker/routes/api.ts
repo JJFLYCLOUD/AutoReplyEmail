@@ -451,7 +451,9 @@ export function createApi(): Hono<AppEnv> {
         )
           .bind(mailboxId)
           .all()
-      : await c.env.DB.prepare("SELECT * FROM rules ORDER BY created_at DESC LIMIT 200").all();
+      : await c.env.DB.prepare(
+          "SELECT * FROM rules ORDER BY priority ASC, created_at ASC LIMIT 200",
+        ).all();
     const items = await Promise.all(
       (result.results || []).map(async (rule) => ({
         ...rule,

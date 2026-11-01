@@ -250,6 +250,7 @@ node scripts/dev-auth-test.mjs
 node scripts/dev-features-test.mjs
 node scripts/dev-single-outbound-test.mjs
 node scripts/dev-inline-send-test.mjs
+node scripts/dev-rule-order-test.mjs
 ```
 
 IMAP / POP3 客户端可以用内置假服务器验证（假服务器会占用终端，请另开终端执行测试脚本）：

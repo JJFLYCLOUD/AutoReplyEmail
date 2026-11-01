@@ -135,6 +135,9 @@ export default function RulesPage() {
 
   const mailboxList = mailboxes.data?.items || [];
   const templateList = templates.data?.items || [];
+  const sortedRules = [...(rules.data?.items || [])].sort(
+    (a, b) => a.priority - b.priority || a.created_at - b.created_at,
+  );
   const mailboxMap = useMemo(
     () => new Map(mailboxList.map((item) => [item.id, item])),
     [mailboxList],
@@ -290,6 +293,9 @@ export default function RulesPage() {
           <Button variant="outline" size="sm" onClick={rules.reload}>
             刷新
           </Button>
+          <span className="text-[11px] text-slate-400">
+            按优先级升序，数字越小越先匹配
+          </span>
         </div>
         <Button size="sm" onClick={openCreate} disabled={!mailboxList.length}>
           新建规则
@@ -317,7 +323,7 @@ export default function RulesPage() {
       ) : null}
 
       <div className="space-y-2">
-        {(rules.data?.items || []).map((rule) => {
+        {(sortedRules).map((rule) => {
           const template = templateMap.get(
             (() => {
               try {
