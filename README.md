@@ -266,6 +266,9 @@ node scripts/dev-imap-poll-test.mjs
 # 可选：模拟服务器乱序返回 TEXT / HEADER
 npm run fake:imap -- --reverse-parts
 
+# 可选：模拟 multipart/alternative + base64 正文
+npm run fake:imap -- --base64-multipart
+
 # 停止 IMAP 假服务器后，终端 A 启动 POP3 假服务器
 npm run fake:pop3
 
@@ -448,6 +451,9 @@ wrangler.jsonc
 
 **Q：报 `CREDENTIAL_KEY is not configured`？**  
 在 Worker Settings 添加 `CREDENTIAL_KEY` Secret。
+
+**Q：邮件正文是 base64 或只有 HTML，能识别关键词吗？**  
+可以。解析器会递归解析 `multipart`，按 part 解码 `base64` / `quoted-printable`，优先使用 `text/plain`，没有纯文本时使用 HTML 去标签后的内容。IMAP 正文拉取上限为 32KB，POP3 为 300 行。
 
 **Q：CF 邮箱回复失败？**  
 `message.reply()` 要求 DMARC 通过、同域、References ≤100。本应用不会自动切换备用通道；失败会记录为失败，请改用 SMTP/API 通道或检查邮件条件。

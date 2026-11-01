@@ -237,7 +237,7 @@ export class ImapClient {
 
   async fetchMessage(uid: number): Promise<ImapFetchedMessage> {
     const result = await this.commandRaw(
-      `UID FETCH ${uid} (UID RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.16384>)`,
+      `UID FETCH ${uid} (UID RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.32768>)`,
     );
     if (!result.ok) throw new Error(`IMAP FETCH 失败: ${result.text}`);
 

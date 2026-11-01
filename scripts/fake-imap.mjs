@@ -6,7 +6,8 @@ import net from "node:net";
 
 const port = Number(process.argv[2] || 20993);
 const reverseParts = process.argv.includes("--reverse-parts");
-const header =
+const base64Multipart = process.argv.includes("--base64-multipart");
+let header =
   "From: Alice <alice@example.net>\r\n" +
   "To: support@example.com\r\n" +
   "Subject: Fake IMAP message\r\n" +
@@ -14,7 +15,33 @@ const header =
   `Date: ${new Date().toUTCString()}\r\n` +
   "Content-Type: text/plain; charset=utf-8\r\n" +
   "\r\n";
-const body = "Hello from fake IMAP. We would like a price list.\r\n";
+let body = "Hello from fake IMAP. We would like a price list.\r\n";
+
+if (base64Multipart) {
+  const plain = "Hello from fake IMAP. We would like a price list.";
+  const html = "<html><body><p>Hello from fake IMAP. We would like a price list.</p></body></html>";
+  header =
+    "From: Alice <alice@example.net>\r\n" +
+    "To: support@example.com\r\n" +
+    "Subject: Fake IMAP base64 multipart\r\n" +
+    "Message-ID: <fake-base64-1@example.net>\r\n" +
+    `Date: ${new Date().toUTCString()}\r\n` +
+    "MIME-Version: 1.0\r\n" +
+    'Content-Type: multipart/alternative; boundary="b1"\r\n' +
+    "\r\n";
+  body =
+    "--b1\r\n" +
+    "Content-Type: text/plain; charset=UTF-8\r\n" +
+    "Content-Transfer-Encoding: base64\r\n" +
+    "\r\n" +
+    `${Buffer.from(plain).toString("base64")}\r\n` +
+    "--b1\r\n" +
+    "Content-Type: text/html; charset=UTF-8\r\n" +
+    "Content-Transfer-Encoding: base64\r\n" +
+    "\r\n" +
+    `${Buffer.from(html).toString("base64")}\r\n` +
+    "--b1--\r\n";
+}
 const messageSize = Buffer.byteLength(header) + Buffer.byteLength(body);
 
 const server = net.createServer((socket) => {

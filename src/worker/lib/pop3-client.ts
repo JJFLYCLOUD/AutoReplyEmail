@@ -164,7 +164,7 @@ export class Pop3Client {
     return body.text;
   }
 
-  async fetch(index: number, uid: string, bodyLines = 20): Promise<Pop3Message> {
+  async fetch(index: number, uid: string, bodyLines = 300): Promise<Pop3Message> {
     let header = "";
     let body = "";
     let raw = "";

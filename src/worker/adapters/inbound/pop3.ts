@@ -58,7 +58,7 @@ export async function pollPop3Mailbox(
     const batch = unseen.slice(0, limit);
 
     for (const item of batch) {
-      const message = await client.fetch(item.index, item.uid, 20);
+      const message = await client.fetch(item.index, item.uid, 300);
       const inbound = normalizePop3Message(mailbox, channel, message);
       const r2Key = `raw/${mailbox.id}/pop3-${item.index}-${Date.now()}.eml`;
       try {

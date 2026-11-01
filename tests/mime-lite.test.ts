@@ -41,6 +41,88 @@ describe("mime-lite", () => {
     expect(extractTextFromRaw(raw)).toBe("Hello World");
   });
 
+  it("decodes base64 inside multipart/alternative", () => {
+    const textBase64 =
+      "5pyA5paw5Zyw5Z2ACuWFs+mUruivje+8muaKpeS7twror7flm57lpI0=";
+    const htmlBase64 =
+      "PGh0bWw+PGJvZHk+PHA+5pyA5paw5Zyw5Z2APC9wPjxwPuWFs+mUruivje+8muaKpeS7tzwvcD48L2JvZHk+PC9odG1sPg==";
+    const raw = [
+      'Content-Type: multipart/alternative; boundary="b1"',
+      "",
+      "--b1",
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      textBase64,
+      "--b1",
+      "Content-Type: text/html; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      htmlBase64,
+      "--b1--",
+      "",
+    ].join("\r\n");
+
+    const text = extractTextFromRaw(raw);
+    expect(text).toContain("最新地址");
+    expect(text).toContain("关键词");
+    expect(text).toContain("报价");
+  });
+
+  it("falls back to HTML when there is no text/plain part", () => {
+    const htmlBase64 =
+      "PGh0bWw+PGJvZHk+PHA+5pyA5paw5Zyw5Z2APC9wPjwvYm9keT48L2h0bWw+";
+    const raw = [
+      'Content-Type: multipart/alternative; boundary="b2"',
+      "",
+      "--b2",
+      "Content-Type: text/html; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      htmlBase64,
+      "--b2--",
+      "",
+    ].join("\r\n");
+    expect(extractTextFromRaw(raw)).toContain("最新地址");
+  });
+
+  it("decodes truncated base64 parts", () => {
+    const truncated = "5pyA5paw5Zyw5Z2ACuWFs+mUruivje+8muaKpeS7twror7flm57lpI0=".slice(0, -8);
+    const raw = [
+      'Content-Type: multipart/alternative; boundary="b3"',
+      "",
+      "--b3",
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      truncated,
+      "--b3--",
+      "",
+    ].join("\r\n");
+    expect(extractTextFromRaw(raw)).toContain("最新地址");
+  });
+
+  it("handles nested multipart messages", () => {
+    const textBase64 = "5pyA5paw5Zyw5Z2A";
+    const raw = [
+      'Content-Type: multipart/mixed; boundary="outer"',
+      "",
+      "--outer",
+      'Content-Type: multipart/alternative; boundary="inner"',
+      "",
+      "--inner",
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      textBase64,
+      "--inner--",
+      "",
+      "--outer--",
+      "",
+    ].join("\r\n");
+    expect(extractTextFromRaw(raw)).toContain("最新地址");
+  });
+
   it("parses addresses", () => {
     expect(parseAddress('"Alice" <Alice@Example.com>')).toEqual({
       name: "Alice",

@@ -71,7 +71,7 @@ export function decodeMimeWords(value: string): string {
   });
 }
 
-export function decodeQuotedPrintable(value: string): string {
+export function decodeQuotedPrintable(value: string, charset = "utf-8"): string {
   const bytes: number[] = [];
   const input = value.replace(/\r\n/g, "\n");
   for (let i = 0; i < input.length; i++) {
@@ -90,17 +90,30 @@ export function decodeQuotedPrintable(value: string): string {
     }
     bytes.push(input.charCodeAt(i));
   }
-  return decoder.decode(new Uint8Array(bytes));
+  return decodeCharset(new Uint8Array(bytes), charset);
 }
 
-export function decodeBase64Text(value: string): string {
+export function decodeBase64Text(value: string, charset = "utf-8"): string {
+  const bytes = decodeBase64Bytes(value);
+  return bytes ? decodeCharset(bytes, charset) : value;
+}
+
+function decodeBase64Bytes(value: string): Uint8Array | null {
+  let cleaned = value
+    .replace(/\s+/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .replace(/=+$/, "");
+  if (cleaned.length % 4 === 1) cleaned = cleaned.slice(0, -1);
+  cleaned += "=".repeat((4 - (cleaned.length % 4)) % 4);
+  if (!cleaned) return null;
   try {
-    const binary = atob(value.replace(/\s+/g, ""));
+    const binary = atob(cleaned);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return decoder.decode(bytes);
+    return bytes;
   } catch {
-    return value;
+    return null;
   }
 }
 
@@ -120,28 +133,137 @@ export function stripHtml(value: string): string {
     .trim();
 }
 
+interface ContentTypeInfo {
+  type: string;
+  params: Record<string, string>;
+}
+
+function parseContentType(value: string): ContentTypeInfo {
+  const segments: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (const char of value) {
+    if (char === '"') inQuote = !inQuote;
+    if (char === ";" && !inQuote) {
+      segments.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) segments.push(current);
+
+  const type = (segments.shift() || "text/plain").trim().toLowerCase();
+  const params: Record<string, string> = {};
+  for (const segment of segments) {
+    const index = segment.indexOf("=");
+    if (index < 0) continue;
+    const key = segment.slice(0, index).trim().toLowerCase();
+    let valuePart = segment.slice(index + 1).trim();
+    if (
+      (valuePart.startsWith('"') && valuePart.endsWith('"')) ||
+      (valuePart.startsWith("'") && valuePart.endsWith("'"))
+    ) {
+      valuePart = valuePart.slice(1, -1);
+    }
+    params[key] = valuePart;
+  }
+  return { type, params };
+}
+
+function splitMimeParts(body: string, boundary: string): string[] {
+  const marker = `--${boundary}`;
+  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const parts: string[] = [];
+  let current: string[] | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.replace(/[ \t]+$/, "");
+    if (trimmed === marker || trimmed.startsWith(`${marker}--`)) {
+      if (current) parts.push(current.join("\n"));
+      if (trimmed.startsWith(`${marker}--`)) {
+        current = null;
+        break;
+      }
+      current = [];
+      continue;
+    }
+    if (current) current.push(line);
+  }
+
+  if (current?.length) parts.push(current.join("\n"));
+  return parts;
+}
+
+interface ExtractedParts {
+  plain: string[];
+  html: string[];
+}
+
+function extractMimePart(part: string, depth = 0): ExtractedParts {
+  const headers = parseHeaderBlock(rawHeaderBlock(part));
+  const disposition = (headers["content-disposition"] || "").toLowerCase();
+  if (disposition.startsWith("attachment")) return { plain: [], html: [] };
+
+  const contentType = parseContentType(headers["content-type"] || "text/plain");
+  const body = rawBodyBlock(part);
+
+  if (depth < 6 && contentType.type.startsWith("multipart/")) {
+    const boundary = contentType.params.boundary;
+    if (!boundary) return { plain: [], html: [] };
+    const output: ExtractedParts = { plain: [], html: [] };
+    for (const child of splitMimeParts(body, boundary)) {
+      const extracted = extractMimePart(child, depth + 1);
+      output.plain.push(...extracted.plain);
+      output.html.push(...extracted.html);
+    }
+    return output;
+  }
+
+  const transfer = (headers["content-transfer-encoding"] || "").toLowerCase();
+  const charset = contentType.params.charset || "utf-8";
+  let decoded = body;
+  if (transfer.includes("base64")) decoded = decodeBase64Text(body, charset);
+  else if (transfer.includes("quoted-printable")) decoded = decodeQuotedPrintable(body, charset);
+
+  if (contentType.type === "text/html") return { plain: [], html: [decoded] };
+  if (contentType.type.startsWith("text/")) return { plain: [decoded], html: [] };
+  return { plain: [], html: [] };
+}
+
+function normalizeExtractedText(value: string, limit: number): string {
+  return value.replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, limit);
+}
+
 export function extractTextFromRaw(raw: string, limit = 16384): string {
   const headers = parseHeaderBlock(rawHeaderBlock(raw));
   const body = rawBodyBlock(raw);
-  const contentType = (headers["content-type"] || "").toLowerCase();
-  const transfer = (headers["content-transfer-encoding"] || "").toLowerCase();
+  const contentType = parseContentType(headers["content-type"] || "text/plain");
 
-  let decoded = body;
-  if (transfer.includes("base64")) decoded = decodeBase64Text(body);
-  else if (transfer.includes("quoted-printable")) decoded = decodeQuotedPrintable(body);
-
-  if (contentType.includes("text/html")) decoded = stripHtml(decoded);
-  else if (contentType.includes("multipart/")) {
-    decoded = decoded
-      .replace(/^--[^\n]+$/gm, " ")
-      .replace(
-        /^(content-type|content-transfer-encoding|content-disposition|content-id|mime-version):.*$/gim,
-        " ",
-      );
-    if (/<html|<body|<div|<p[ >]/i.test(decoded)) decoded = stripHtml(decoded);
+  if (contentType.type.startsWith("multipart/")) {
+    const boundary = contentType.params.boundary;
+    if (boundary) {
+      const output: ExtractedParts = { plain: [], html: [] };
+      for (const part of splitMimeParts(body, boundary)) {
+        const extracted = extractMimePart(part);
+        output.plain.push(...extracted.plain);
+        output.html.push(...extracted.html);
+      }
+      const plain = output.plain.join("\n\n").trim();
+      const html = output.html.join("\n\n").trim();
+      const text = plain || (html ? stripHtml(html) : "");
+      if (text) return normalizeExtractedText(text, limit);
+    }
   }
 
-  return decoded.replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, limit);
+  const transfer = (headers["content-transfer-encoding"] || "").toLowerCase();
+  const charset = contentType.params.charset || "utf-8";
+  let decoded = body;
+  if (transfer.includes("base64")) decoded = decodeBase64Text(body, charset);
+  else if (transfer.includes("quoted-printable")) decoded = decodeQuotedPrintable(body, charset);
+
+  if (contentType.type === "text/html") decoded = stripHtml(decoded);
+  return normalizeExtractedText(decoded, limit);
 }
 
 export interface ParsedAddress {
