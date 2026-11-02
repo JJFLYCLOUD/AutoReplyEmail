@@ -326,7 +326,9 @@ export function referenceIds(references: string | null | undefined): string[] {
 export function normalizeMessageId(value: string | null | undefined): string {
   if (!value) return "";
   const match = value.match(/<[^>]+>/);
-  return (match ? match[0] : value).trim();
+  if (match) return match[0].trim();
+  const bare = value.trim().replace(/^<+/, "").replace(/>+$/, "");
+  return bare ? `<${bare}>` : "";
 }
 
 export function buildThreadKey(input: {

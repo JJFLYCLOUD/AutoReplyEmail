@@ -29,6 +29,7 @@ interface RuleForm {
   domains: string;
   includeSubdomains: boolean;
   templateId: string;
+  replyAsNew: boolean;
   aiMode: "off" | "polish" | "classify";
   delaySeconds: string;
   cooldownHours: string;
@@ -48,6 +49,7 @@ const emptyForm: RuleForm = {
   domains: "",
   includeSubdomains: true,
   templateId: "",
+  replyAsNew: false,
   aiMode: "off",
   delaySeconds: "0",
   cooldownHours: "24",
@@ -111,6 +113,7 @@ function formFromRule(rule: Rule): RuleForm {
     domains: Array.isArray(domainFilter.domains) ? domainFilter.domains.join(", ") : "",
     includeSubdomains: domainFilter.includeSubdomains !== false,
     templateId: String(action.templateId || ""),
+    replyAsNew: action.replyAsNew === true,
     aiMode: (ai.mode as RuleForm["aiMode"]) || "off",
     delaySeconds: String(action.delaySeconds || 0),
     cooldownHours: String(guards.cooldownHours ?? 24),
@@ -146,6 +149,9 @@ export default function RulesPage() {
     () => new Map(templateList.map((item) => [item.id, item])),
     [templateList],
   );
+  const selectedHasCfReply = mailboxList
+    .filter((mailbox) => form.mailboxIds.includes(mailbox.id))
+    .some((mailbox) => (mailbox.outbound || []).some((channel) => channel.kind === "cf_reply"));
 
   function update<K extends keyof RuleForm>(key: K, value: RuleForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -228,6 +234,7 @@ export default function RulesPage() {
       action: {
         type: "reply",
         templateId: form.templateId,
+        replyAsNew: form.replyAsNew,
         ai: { mode: form.aiMode },
         delaySeconds: Number(form.delaySeconds) || 0,
       },
@@ -324,15 +331,19 @@ export default function RulesPage() {
 
       <div className="space-y-2">
         {(sortedRules).map((rule) => {
-          const template = templateMap.get(
-            (() => {
-              try {
-                return JSON.parse(rule.action_json || "{}").templateId;
-              } catch {
-                return "";
-              }
-            })(),
-          );
+          const action = (() => {
+            try {
+              return JSON.parse(rule.action_json || "{}") as {
+                templateId?: string;
+                ai?: { mode?: string };
+                replyAsNew?: boolean;
+              };
+            } catch {
+              return {};
+            }
+          })();
+          const template = templateMap.get(action.templateId || "");
+          const replyAsNew = action.replyAsNew === true;
           const mailboxNames = rule.mailboxIds.map(
             (id) => mailboxMap.get(id)?.address || id,
           );
@@ -357,6 +368,7 @@ export default function RulesPage() {
                   </Badge>
                   <Badge tone="indigo">优先级 {rule.priority}</Badge>
                   {template ? <Badge tone="blue">模板：{template.name}</Badge> : null}
+                  {replyAsNew ? <Badge tone="amber">新会话</Badge> : null}
                   {domainMode !== "off" ? (
                     <Badge tone={domainMode === "allow" ? "green" : "red"}>
                       域名{domainMode === "allow" ? "白名单" : "黑名单"}：
@@ -374,13 +386,7 @@ export default function RulesPage() {
                   <span className="truncate">关键词：{parseKeywords(rule) || "自定义 JSON"}</span>
                   <span>
                     AI：
-                    {(() => {
-                      try {
-                        return JSON.parse(rule.action_json || "{}").ai?.mode || "off";
-                      } catch {
-                        return "off";
-                      }
-                    })()}
+                    {action.ai?.mode || "off"}
                   </span>
                 </div>
               </div>
@@ -624,6 +630,27 @@ export default function RulesPage() {
                 />
               </Field>
             </div>
+            <label className="flex items-start gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={form.replyAsNew}
+                onChange={(event) => update("replyAsNew", event.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300"
+              />
+              <span>
+                回复新邮件（不合并会话）
+                <span className="mt-0.5 block text-[11px] leading-5 text-slate-400">
+                  勾选后不设置 In-Reply-To / References，主题使用模板内容；不勾选则合并到原会话并使用
+                  Re: 原主题。
+                </span>
+              </span>
+            </label>
+            {form.replyAsNew && selectedHasCfReply ? (
+              <p className="text-[11px] leading-5 text-amber-600">
+                所选邮箱包含 Cloudflare 原生回复通道。cf_reply 无法发送新会话，命中时会跳过并记录原因，
+                请改用 SMTP / Resend / Mailgun。
+              </p>
+            ) : null}
             {!templateList.length ? (
               <p className="text-[11px] text-amber-600">
                 还没有模板，请先到“模板”页面创建。

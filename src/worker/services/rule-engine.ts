@@ -61,6 +61,7 @@ export const aiOptionsSchema = z.object({
 export const ruleActionSchema = z.object({
   type: z.literal("reply").default("reply"),
   templateId: z.string().min(1),
+  replyAsNew: z.boolean().default(false),
   ai: aiOptionsSchema.optional(),
   delaySeconds: z.number().int().min(0).max(86400).optional(),
 });

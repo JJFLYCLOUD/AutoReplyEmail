@@ -19,7 +19,8 @@ import {
 } from "./rule-engine";
 import { claimReply, releaseReplyClaim } from "./throttle";
 import { isBusinessHoursAllowed } from "./schedule";
-import { renderTemplate, normalizeReplySubject, quoteBody } from "./template";
+import { renderTemplate, quoteBody } from "./template";
+import { buildReplyThread } from "../lib/reply-thread";
 import { loadSettings } from "./settings";
 import { aiClassify, aiPolish } from "./ai";
 import { enqueueJob, type SendJobPayload } from "./jobs";
@@ -272,6 +273,16 @@ export async function processInbound(
       ruleName: candidate.rule.name,
     };
 
+    if (channel.kind === "cf_reply" && candidate.action.replyAsNew === true) {
+      await recordAttempt(env, {
+        ...attemptBase,
+        status: "skipped",
+        reason:
+          "cf_reply_requires_thread: Cloudflare 原生回复无法发送新会话，请改用 SMTP / Resend / Mailgun",
+      });
+      continue;
+    }
+
     const actionAi = candidate.action.ai || { mode: "off" as const };
     let template = candidate.template;
     if (actionAi.mode === "classify" && settings.ai.enabled) {
@@ -344,17 +355,22 @@ export async function processInbound(
       rendered.html = `${rendered.html}\n<p>${textToHtml(variables.ai_text)}</p>`;
     }
 
-    const subject = normalizeReplySubject(rendered.subject || inbound.subject);
-    const references = refs
-      .concat(normalizeMessageId(inbound.messageId) ? [normalizeMessageId(inbound.messageId)] : [])
-      .slice(-99);
+    const thread = buildReplyThread({
+      replyAsNew: candidate.action.replyAsNew === true,
+      inboundMessageId: inbound.messageId,
+      inboundReferences: inbound.headers.references,
+      inboundSubject: inbound.subject,
+      templateSubject: rendered.subject,
+    });
+    const subject = thread.subject;
+    const references = thread.references;
     const replyHeaders: Record<string, string> = {
       "Auto-Submitted": "auto-replied",
       "X-Auto-Response-Suppress": "All",
       "X-Auto-Reply": "auto-reply-email",
     };
-    if (inReplyTo || inbound.messageId) {
-      replyHeaders["In-Reply-To"] = inReplyTo || normalizeMessageId(inbound.messageId);
+    if (thread.inReplyTo) {
+      replyHeaders["In-Reply-To"] = thread.inReplyTo;
     }
     if (references.length) replyHeaders["References"] = references.join(" ");
 
@@ -396,7 +412,7 @@ export async function processInbound(
         const outboundId = await insertOutboundMessage(env, {
           mailboxId: mailbox.id,
           channelId: channel.id,
-          inReplyTo: inReplyTo || inbound.messageId,
+          inReplyTo: thread.inReplyTo || inbound.messageId,
           references,
           threadKey,
           from: cfSender,

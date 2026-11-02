@@ -509,7 +509,7 @@ export default function MailboxesPage() {
 
             {form.outboundKind === "cf_reply" ? (
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-700">
-                Cloudflare 原生回复仅执行首个匹配规则，只回复一封邮件。需要一封邮件回复多次，请改用
+                Cloudflare 原生回复仅执行首个匹配规则，只回复一封邮件，也无法发送新会话。需要多规则回复或新会话，请改用
                 SMTP / Resend / Mailgun。
               </div>
             ) : null}

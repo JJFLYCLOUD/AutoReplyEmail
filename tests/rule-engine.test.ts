@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateCondition,
   matchesRule,
+  parseRuleAction,
   parseRuleMatch,
   type MatchContext,
 } from "../src/worker/services/rule-engine";
@@ -197,5 +198,25 @@ describe("sender domain filter", () => {
       domains: ["customer.com"],
       includeSubdomains: false,
     });
+  });
+});
+
+describe("rule action", () => {
+  it("defaults replyAsNew to false", () => {
+    const action = parseRuleAction(JSON.stringify({ templateId: "tpl_1" }));
+    expect(action?.replyAsNew).toBe(false);
+  });
+
+  it("parses replyAsNew true", () => {
+    const action = parseRuleAction(
+      JSON.stringify({ templateId: "tpl_1", replyAsNew: true }),
+    );
+    expect(action?.replyAsNew).toBe(true);
+  });
+
+  it("rejects an invalid replyAsNew value", () => {
+    expect(
+      parseRuleAction(JSON.stringify({ templateId: "tpl_1", replyAsNew: "yes" })),
+    ).toBeNull();
   });
 });
