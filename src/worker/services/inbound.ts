@@ -7,11 +7,16 @@ import {
 import { newId, now, parseJson, textToHtml } from "../lib/util";
 import type { Env, MailboxRow, NormalizedInbound, RuleRow, TemplateRow } from "../types";
 import { sendCfReply } from "../adapters/outbound/cf-reply";
-import {
-  outboundMessageFrom,
-} from "../adapters/outbound";
+import { outboundMessageFrom } from "../adapters/outbound";
 import { evaluateStaticGuards } from "./guard";
-import { matchesRule, parseRuleAction, parseRuleGuards, parseRuleMatch } from "./rule-engine";
+import {
+  matchesRule,
+  parseRuleAction,
+  parseRuleGuards,
+  parseRuleMatch,
+  type RuleAction,
+  type RuleGuards,
+} from "./rule-engine";
 import { claimReply, releaseReplyClaim } from "./throttle";
 import { isBusinessHoursAllowed } from "./schedule";
 import { renderTemplate, normalizeReplySubject, quoteBody } from "./template";
@@ -19,11 +24,8 @@ import { loadSettings } from "./settings";
 import { aiClassify, aiPolish } from "./ai";
 import { enqueueJob, type SendJobPayload } from "./jobs";
 import { getTemplate, getOutboundChannel, listRules, listTemplates } from "./store";
-import {
-  insertOutboundMessage,
-  recordSendLog,
-  updateInboundStatus,
-} from "./message-log";
+import { insertOutboundMessage, recordSendLog, updateInboundStatus } from "./message-log";
+import { recordAttempt, refreshInboundStatus, updateAttempt } from "./attempts";
 import { deliverOutbound } from "./delivery";
 
 export interface PipelineOptions {
@@ -34,7 +36,21 @@ export interface PipelineResult {
   status: "replied" | "queued" | "skipped" | "failed" | "duplicate";
   inboundMessageId: string;
   ruleId?: string;
+  ruleIds?: string[];
   reason?: string;
+}
+
+interface RuleCandidate {
+  rule: RuleRow;
+  template: TemplateRow;
+  action: RuleAction;
+  guards: RuleGuards;
+}
+
+interface BlockedRule {
+  rule: RuleRow;
+  code: string;
+  reason: string;
 }
 
 export async function processInbound(
@@ -119,31 +135,54 @@ export async function processInbound(
     hasAttachment: inbound.hasAttachment,
   };
 
+  // A CF native reply can only be sent once per EmailMessage event, so that
+  // channel deliberately stops at the first matching rule.
+  const channel = await getOutboundChannel(env, mailbox.id);
+  const singleReply = channel?.kind === "cf_reply";
+
   const rules = await listRules(env, mailbox.id);
-  let matched: { rule: RuleRow; template: TemplateRow } | null = null;
+  const candidates: RuleCandidate[] = [];
   let outsideHours = false;
+  let blocked: BlockedRule | null = null;
 
   for (const rule of rules) {
-    const match = parseRuleMatch(rule.match_json);
-    if (!matchesRule(match, context)) continue;
+    if (!matchesRule(parseRuleMatch(rule.match_json), context)) continue;
     const guards = parseRuleGuards(rule.guards_json);
+    const action = parseRuleAction(rule.action_json);
+
+    if (singleReply) {
+      if (!action) {
+        blocked = { rule, code: "invalid_action", reason: "规则动作无效" };
+      } else if (!isBusinessHoursAllowed(guards)) {
+        blocked = { rule, code: "outside_business_hours", reason: "当前不在规则生效时间内" };
+      } else {
+        const template = await getTemplate(env, action.templateId);
+        if (!template) {
+          blocked = { rule, code: "template_missing", reason: "规则绑定的模板不存在" };
+        } else {
+          candidates.push({ rule, template, action, guards });
+        }
+      }
+      break;
+    }
+
     if (!isBusinessHoursAllowed(guards)) {
       outsideHours = true;
       continue;
     }
-    const action = parseRuleAction(rule.action_json);
     if (!action) continue;
     const template = await getTemplate(env, action.templateId);
     if (!template) continue;
-    matched = { rule, template };
-    break;
+    candidates.push({ rule, template, action, guards });
   }
 
-  if (!matched && outsideHours) {
-    return await skip(env, inboundId, "outside_business_hours", "当前不在规则生效时间内");
-  }
-
-  if (!matched && settings.ai.enabled && settings.ai.classifyFallback) {
+  if (
+    !candidates.length &&
+    !blocked &&
+    !outsideHours &&
+    settings.ai.enabled &&
+    settings.ai.classifyFallback
+  ) {
     const templates = await listTemplates(env);
     if (templates.length) {
       const aiPick = await aiClassify(
@@ -168,247 +207,355 @@ export async function processInbound(
         ? templates.find((template) => template.id === aiPick.templateId)
         : null;
       if (picked) {
-        matched = {
-          rule: {
-            id: "ai-classify",
-            name: "AI 分类",
-            priority: 999,
-            enabled: 1,
-            match_json: "{}",
-            guards_json: "{}",
-            action_json: JSON.stringify({ type: "reply", templateId: picked.id }),
-            created_at: timestamp,
-            updated_at: timestamp,
-          },
-          template: picked,
-        };
+        const action = parseRuleAction(JSON.stringify({ type: "reply", templateId: picked.id }));
+        if (action) {
+          candidates.push({
+            rule: {
+              id: "ai-classify",
+              name: "AI 分类",
+              priority: 999,
+              enabled: 1,
+              match_json: "{}",
+              guards_json: "{}",
+              action_json: JSON.stringify({ type: "reply", templateId: picked.id }),
+              created_at: timestamp,
+              updated_at: timestamp,
+            },
+            template: picked,
+            action,
+            guards: {},
+          });
+        }
       }
     }
   }
 
-  if (!matched) {
+  if (blocked) {
+    const reason = `${blocked.code}: ${blocked.reason}`;
+    await recordAttempt(env, {
+      inboundMessageId: inboundId,
+      mailboxId: mailbox.id,
+      ruleId: blocked.rule.id,
+      ruleName: blocked.rule.name,
+      status: "skipped",
+      reason,
+    });
+    return await finalize(env, inboundId, [blocked.rule.id], reason);
+  }
+
+  if (!candidates.length) {
+    if (outsideHours) {
+      return await skip(env, inboundId, "outside_business_hours", "当前不在规则生效时间内");
+    }
     return await skip(env, inboundId, "no_match", "没有匹配的规则或模板");
   }
 
-  const action = parseRuleAction(matched.rule.action_json);
-  if (!action) {
-    return await skip(env, inboundId, "invalid_action", "规则动作无效");
-  }
-  const guards = parseRuleGuards(matched.rule.guards_json);
-  const actionAi = action.ai || { mode: "off" as const };
-
-  let template = matched.template;
-  if (actionAi.mode === "classify" && settings.ai.enabled) {
-    const templates = await listTemplates(env);
-    const aiPick = await aiClassify(
-      env,
-      settings,
-      mailbox.id,
-      {
-        fromName: inbound.fromName,
-        from: inbound.from,
-        subject: inbound.subject,
-        body: inbound.text,
-        templateSubject: template.subject_tpl,
-        templateText: template.text_tpl,
-      },
-      templates.map((item) => ({ id: item.id, name: item.name, subject: item.subject_tpl })),
-    );
-    if (aiPick && aiPick.confidence >= 0.5) {
-      template = templates.find((item) => item.id === aiPick.templateId) || template;
-    }
-  }
-
-  const throttle = await claimReply(env, {
-    mailboxId: mailbox.id,
-    ruleId: matched.rule.id,
-    threadKey,
-    senderKey: inbound.from,
-    cooldownHours: guards.cooldownHours ?? 24,
-    maxPerThread: guards.maxPerThread ?? 1,
-    globalDailyLimit: settings.globalDailyLimit,
-  });
-  if (!throttle.allowed) {
-    return await skip(env, inboundId, throttle.code || "throttled", throttle.reason || "触发限流");
-  }
-
-  const variables: Record<string, string> = {
-    sender_name: inbound.fromName || inbound.from,
-    sender_email: inbound.from,
-    subject: inbound.subject,
-    original_subject: inbound.subject,
-    date: new Date(timestamp).toISOString(),
-    mailbox: mailbox.address,
-    mailbox_name: mailbox.display_name || mailbox.address,
-    quoted_body: quoteBody(inbound.text),
-    ai_text: "",
-  };
-
-  if (actionAi.mode === "polish" && settings.ai.enabled) {
-    const base = renderTemplate(template, variables);
-    const polished = await aiPolish(env, settings, mailbox.id, {
-      fromName: inbound.fromName,
-      from: inbound.from,
-      subject: inbound.subject,
-      body: inbound.text,
-      templateSubject: base.subject,
-      templateText: base.text,
-    });
-    if (polished) variables.ai_text = polished;
-  }
-
-  const rendered = renderTemplate(template, variables);
-  if (variables.ai_text && !template.text_tpl.includes("{{ai_text}}")) {
-    rendered.text = `${rendered.text}\n\n${variables.ai_text}`.trim();
-    rendered.html = `${rendered.html}\n<p>${textToHtml(variables.ai_text)}</p>`;
-  }
-
-  const subject = normalizeReplySubject(rendered.subject || inbound.subject);
-  const references = refs
-    .concat(normalizeMessageId(inbound.messageId) ? [normalizeMessageId(inbound.messageId)] : [])
-    .slice(-99);
-  const replyHeaders: Record<string, string> = {
-    "Auto-Submitted": "auto-replied",
-    "X-Auto-Response-Suppress": "All",
-    "X-Auto-Reply": "auto-reply-email",
-  };
-  if (inReplyTo || inbound.messageId) {
-    replyHeaders["In-Reply-To"] = inReplyTo || normalizeMessageId(inbound.messageId);
-  }
-  if (references.length) replyHeaders["References"] = references.join(" ");
-
-  const replyInput = {
-    to: inbound.from,
-    subject,
-    text: rendered.text,
-    html: rendered.html,
-    headers: replyHeaders,
-  };
-
-  const delaySeconds = action.delaySeconds || 0;
-  const channel = await getOutboundChannel(env, mailbox.id);
-
   if (!channel || channel.status !== "active") {
-    await releaseReplyClaim(env, mailbox.id, threadKey);
-    return await fail(
+    return await failCandidates(
       env,
       inboundId,
+      mailbox.id,
+      candidates,
       "no_outbound_channel",
       "该邮箱没有可用的发信通道",
     );
   }
 
-  if (channel.kind === "cf_reply") {
-    if (!options.cfMessage) {
-      await releaseReplyClaim(env, mailbox.id, threadKey);
-      return await fail(
+  const attemptedRuleIds: string[] = [];
+
+  for (const candidate of candidates) {
+    attemptedRuleIds.push(candidate.rule.id);
+    const attemptBase = {
+      inboundMessageId: inboundId,
+      mailboxId: mailbox.id,
+      ruleId: candidate.rule.id,
+      ruleName: candidate.rule.name,
+    };
+
+    const actionAi = candidate.action.ai || { mode: "off" as const };
+    let template = candidate.template;
+    if (actionAi.mode === "classify" && settings.ai.enabled) {
+      const templates = await listTemplates(env);
+      const aiPick = await aiClassify(
         env,
-        inboundId,
-        "cf_reply_requires_cf_routing",
-        "cf_reply 只能用于 Cloudflare Email Routing 入站邮件",
+        settings,
+        mailbox.id,
+        {
+          fromName: inbound.fromName,
+          from: inbound.from,
+          subject: inbound.subject,
+          body: inbound.text,
+          templateSubject: template.subject_tpl,
+          templateText: template.text_tpl,
+        },
+        templates.map((item) => ({ id: item.id, name: item.name, subject: item.subject_tpl })),
       );
-    }
-    if (delaySeconds > 0) {
-      await releaseReplyClaim(env, mailbox.id, threadKey);
-      return await fail(
-        env,
-        inboundId,
-        "cf_reply_no_delay",
-        "Cloudflare 原生回复不支持延迟发送",
-      );
+      if (aiPick && aiPick.confidence >= 0.5) {
+        template = templates.find((item) => item.id === aiPick.templateId) || template;
+      }
     }
 
-    const cfMessage = outboundMessageFrom(mailbox, channel, replyInput);
-    const cfSender = inbound.to[0] || mailbox.address;
-    cfMessage.from.email = cfSender;
-    try {
-      await sendCfReply(options.cfMessage, cfMessage);
-      const outboundId = await insertOutboundMessage(env, {
+    const throttle = await claimReply(env, {
+      mailboxId: mailbox.id,
+      ruleId: candidate.rule.id,
+      threadKey,
+      senderKey: inbound.from,
+      cooldownHours: candidate.guards.cooldownHours ?? 24,
+      maxPerThread: candidate.guards.maxPerThread ?? 1,
+      globalDailyLimit: settings.globalDailyLimit,
+    });
+    if (!throttle.allowed) {
+      await recordAttempt(env, {
+        ...attemptBase,
+        status: "skipped",
+        reason: `${throttle.code || "throttled"}: ${throttle.reason || "触发限流"}`,
+      });
+      continue;
+    }
+
+    const variables: Record<string, string> = {
+      sender_name: inbound.fromName || inbound.from,
+      sender_email: inbound.from,
+      subject: inbound.subject,
+      original_subject: inbound.subject,
+      date: new Date(timestamp).toISOString(),
+      mailbox: mailbox.address,
+      mailbox_name: mailbox.display_name || mailbox.address,
+      quoted_body: quoteBody(inbound.text),
+      ai_text: "",
+    };
+
+    if (actionAi.mode === "polish" && settings.ai.enabled) {
+      const base = renderTemplate(template, variables);
+      const polished = await aiPolish(env, settings, mailbox.id, {
+        fromName: inbound.fromName,
+        from: inbound.from,
+        subject: inbound.subject,
+        body: inbound.text,
+        templateSubject: base.subject,
+        templateText: base.text,
+      });
+      if (polished) variables.ai_text = polished;
+    }
+
+    const rendered = renderTemplate(template, variables);
+    if (variables.ai_text && !template.text_tpl.includes("{{ai_text}}")) {
+      rendered.text = `${rendered.text}\n\n${variables.ai_text}`.trim();
+      rendered.html = `${rendered.html}\n<p>${textToHtml(variables.ai_text)}</p>`;
+    }
+
+    const subject = normalizeReplySubject(rendered.subject || inbound.subject);
+    const references = refs
+      .concat(normalizeMessageId(inbound.messageId) ? [normalizeMessageId(inbound.messageId)] : [])
+      .slice(-99);
+    const replyHeaders: Record<string, string> = {
+      "Auto-Submitted": "auto-replied",
+      "X-Auto-Response-Suppress": "All",
+      "X-Auto-Reply": "auto-reply-email",
+    };
+    if (inReplyTo || inbound.messageId) {
+      replyHeaders["In-Reply-To"] = inReplyTo || normalizeMessageId(inbound.messageId);
+    }
+    if (references.length) replyHeaders["References"] = references.join(" ");
+
+    const replyInput = {
+      to: inbound.from,
+      subject,
+      text: rendered.text,
+      html: rendered.html,
+      headers: replyHeaders,
+    };
+
+    const delaySeconds = candidate.action.delaySeconds || 0;
+
+    if (channel.kind === "cf_reply") {
+      if (!options.cfMessage) {
+        await releaseReplyClaim(env, mailbox.id, candidate.rule.id, threadKey);
+        await recordAttempt(env, {
+          ...attemptBase,
+          status: "failed",
+          reason: "cf_reply_requires_cf_routing: cf_reply 只能用于 Cloudflare Email Routing 入站邮件",
+        });
+        return await finalize(env, inboundId, attemptedRuleIds);
+      }
+      if (delaySeconds > 0) {
+        await releaseReplyClaim(env, mailbox.id, candidate.rule.id, threadKey);
+        await recordAttempt(env, {
+          ...attemptBase,
+          status: "failed",
+          reason: "cf_reply_no_delay: Cloudflare 原生回复不支持延迟发送",
+        });
+        return await finalize(env, inboundId, attemptedRuleIds);
+      }
+
+      const cfMessage = outboundMessageFrom(mailbox, channel, replyInput);
+      const cfSender = inbound.to[0] || mailbox.address;
+      cfMessage.from.email = cfSender;
+      try {
+        await sendCfReply(options.cfMessage, cfMessage);
+        const outboundId = await insertOutboundMessage(env, {
+          mailboxId: mailbox.id,
+          channelId: channel.id,
+          inReplyTo: inReplyTo || inbound.messageId,
+          references,
+          threadKey,
+          from: cfSender,
+          fromName: channel.from_name || mailbox.display_name || cfSender,
+          to: inbound.from,
+          subject,
+          text: rendered.text,
+          html: rendered.html,
+          ruleId: candidate.rule.id,
+          status: "sent",
+        });
+        await recordSendLog(env, outboundId, "cf_reply", null, "cloudflare email routing reply");
+        await recordAttempt(env, {
+          ...attemptBase,
+          status: "sent",
+          outboundMessageId: outboundId,
+        });
+        return await finalize(env, inboundId, attemptedRuleIds);
+      } catch (error) {
+        await releaseReplyClaim(env, mailbox.id, candidate.rule.id, threadKey);
+        await recordAttempt(env, {
+          ...attemptBase,
+          status: "failed",
+          reason: `cf_reply_failed: Cloudflare 原生回复失败: ${String(
+            error instanceof Error ? error.message : error,
+          )}`,
+        });
+        return await finalize(env, inboundId, attemptedRuleIds);
+      }
+    }
+
+    const outbound = outboundMessageFrom(mailbox, channel, replyInput);
+
+    if (delaySeconds > 0) {
+      const attemptId = await recordAttempt(env, {
+        ...attemptBase,
+        status: "queued",
+        reason: `等待 ${delaySeconds} 秒后通过 ${channel.kind} 发送`,
+      });
+      const payload: SendJobPayload = {
         mailboxId: mailbox.id,
         channelId: channel.id,
-        inReplyTo: inReplyTo || inbound.messageId,
-        references,
+        inboundMessageId: inboundId,
+        ruleId: candidate.rule.id,
         threadKey,
-        from: cfSender,
-        fromName: channel.from_name || mailbox.display_name || cfSender,
-        to: inbound.from,
-        subject,
-        text: rendered.text,
-        html: rendered.html,
-        ruleId: matched.rule.id,
-        status: "sent",
+        attemptId,
+        message: outbound,
+      };
+      await enqueueJob(env, {
+        kind: "send",
+        dedupeKey: `send:${inboundId}:${candidate.rule.id}`,
+        payload,
+        runAt: timestamp + delaySeconds * 1000,
       });
-      await recordSendLog(env, outboundId, "cf_reply", null, "cloudflare email routing reply");
-      await updateInboundStatus(env, inboundId, "replied");
-      return { status: "replied", inboundMessageId: inboundId, ruleId: matched.rule.id };
+      continue;
+    }
+
+    const attemptId = await recordAttempt(env, {
+      ...attemptBase,
+      status: "pending",
+      reason: `立即通过 ${channel.kind} 发送`,
+    });
+    const payload: SendJobPayload = {
+      mailboxId: mailbox.id,
+      channelId: channel.id,
+      inboundMessageId: inboundId,
+      ruleId: candidate.rule.id,
+      threadKey,
+      attemptId,
+      message: outbound,
+    };
+
+    try {
+      const result = await deliverOutbound(env, {
+        mailbox,
+        channel,
+        inboundMessageId: inboundId,
+        ruleId: candidate.rule.id,
+        threadKey,
+        message: outbound,
+      });
+      await updateAttempt(env, attemptId, {
+        status: "sent",
+        reason: null,
+        outboundMessageId: result.outboundId,
+      });
     } catch (error) {
-      await releaseReplyClaim(env, mailbox.id, threadKey);
-      return await fail(
-        env,
-        inboundId,
-        "cf_reply_failed",
-        `Cloudflare 原生回复失败: ${String(error instanceof Error ? error.message : error)}`,
-      );
+      const message = String(error instanceof Error ? error.message : error);
+      console.warn("immediate send failed, queued for retry", {
+        mailbox: mailbox.address,
+        channel: channel.kind,
+        rule: candidate.rule.name,
+        message,
+      });
+      await updateAttempt(env, attemptId, {
+        status: "queued",
+        reason: `立即发送失败，已入队重试: ${message}`,
+      });
+      await enqueueJob(env, {
+        kind: "send",
+        dedupeKey: `send:${inboundId}:${candidate.rule.id}`,
+        payload,
+        runAt: timestamp,
+      });
     }
   }
 
-  const outbound = outboundMessageFrom(mailbox, channel, replyInput);
-  const payload: SendJobPayload = {
-    mailboxId: mailbox.id,
-    channelId: channel.id,
+  return await finalize(env, inboundId, attemptedRuleIds);
+}
+
+async function finalize(
+  env: Env,
+  inboundId: string,
+  ruleIds: string[],
+  fallbackReason?: string,
+): Promise<PipelineResult> {
+  const aggregate = await refreshInboundStatus(env, inboundId);
+  return {
+    status: aggregate?.status || "skipped",
     inboundMessageId: inboundId,
-    ruleId: matched.rule.id,
-    threadKey,
-    message: outbound,
+    ruleId: ruleIds[0],
+    ruleIds,
+    reason: aggregate?.error || fallbackReason,
   };
+}
 
-  if (delaySeconds > 0) {
-    await enqueueJob(env, {
-      kind: "send",
-      dedupeKey: `send:${inboundId}:${matched.rule.id}`,
-      payload,
-      runAt: timestamp + delaySeconds * 1000,
-    });
-    await updateInboundStatus(
-      env,
-      inboundId,
-      "queued",
-      `等待 ${delaySeconds} 秒后通过 ${channel.kind} 发送`,
-    );
-    return { status: "queued", inboundMessageId: inboundId, ruleId: matched.rule.id };
-  }
-
-  try {
-    await deliverOutbound(env, {
-      mailbox,
-      channel,
+async function failCandidates(
+  env: Env,
+  inboundId: string,
+  mailboxId: string,
+  candidates: RuleCandidate[],
+  code: string,
+  reason: string,
+): Promise<PipelineResult> {
+  const ruleIds: string[] = [];
+  for (const candidate of candidates) {
+    ruleIds.push(candidate.rule.id);
+    await recordAttempt(env, {
       inboundMessageId: inboundId,
-      ruleId: matched.rule.id,
-      threadKey,
-      message: outbound,
+      mailboxId,
+      ruleId: candidate.rule.id,
+      ruleName: candidate.rule.name,
+      status: "failed",
+      reason: `${code}: ${reason}`,
     });
-    return { status: "replied", inboundMessageId: inboundId, ruleId: matched.rule.id };
-  } catch (error) {
-    const message = String(error instanceof Error ? error.message : error);
-    console.warn("immediate send failed, queued for retry", {
-      mailbox: mailbox.address,
-      channel: channel.kind,
-      message,
-    });
-    await enqueueJob(env, {
-      kind: "send",
-      dedupeKey: `send:${inboundId}:${matched.rule.id}`,
-      payload,
-      runAt: timestamp,
-    });
-    await updateInboundStatus(
-      env,
-      inboundId,
-      "queued",
-      `立即发送失败，已入队重试: ${message}`,
-    );
-    return { status: "queued", inboundMessageId: inboundId, ruleId: matched.rule.id };
   }
+  const aggregate = await refreshInboundStatus(env, inboundId);
+  const detail = `${code}: ${reason}`;
+  if (!aggregate) {
+    await updateInboundStatus(env, inboundId, "failed", detail);
+    return { status: "failed", inboundMessageId: inboundId, ruleIds, reason: detail };
+  }
+  return {
+    status: aggregate.status,
+    inboundMessageId: inboundId,
+    ruleId: ruleIds[0],
+    ruleIds,
+    reason: aggregate.error || detail,
+  };
 }
 
 async function skip(
@@ -419,16 +566,6 @@ async function skip(
 ): Promise<PipelineResult> {
   await updateInboundStatus(env, inboundId, "skipped", `${code}: ${reason}`);
   return { status: "skipped", inboundMessageId: inboundId, reason: `${code}: ${reason}` };
-}
-
-async function fail(
-  env: Env,
-  inboundId: string,
-  code: string,
-  reason: string,
-): Promise<PipelineResult> {
-  await updateInboundStatus(env, inboundId, "failed", `${code}: ${reason}`);
-  return { status: "failed", inboundMessageId: inboundId, reason: `${code}: ${reason}` };
 }
 
 async function isSuppressed(env: Env, mailboxId: string, from: string): Promise<boolean> {

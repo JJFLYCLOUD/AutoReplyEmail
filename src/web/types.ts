@@ -89,6 +89,19 @@ export interface Message {
   created_at: number;
 }
 
+export interface ReplyAttempt {
+  id: string;
+  inbound_message_id: string;
+  mailbox_id: string;
+  rule_id: string;
+  rule_name: string | null;
+  status: string;
+  reason: string | null;
+  outbound_message_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface Job {
   id: string;
   kind: string;

@@ -182,6 +182,7 @@ export async function deleteMailbox(env: Env, id: string): Promise<void> {
 
   await env.DB.batch([
     env.DB.prepare("DELETE FROM reply_ledger WHERE mailbox_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM reply_attempts WHERE mailbox_id = ?").bind(id),
     env.DB.prepare("DELETE FROM ai_usage WHERE mailbox_id = ?").bind(id),
     env.DB.prepare("DELETE FROM jobs WHERE json_extract(payload_json, '$.mailboxId') = ?").bind(id),
     env.DB.prepare(

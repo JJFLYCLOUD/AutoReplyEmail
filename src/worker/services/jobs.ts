@@ -3,7 +3,7 @@ import { newId, now } from "../lib/util";
 import type { Env, JobRow } from "../types";
 import { type OutboundMessage } from "../adapters/outbound";
 import { getMailbox, getOutboundChannel, getOutboundChannelById, listOutboundChannels } from "./store";
-import { updateInboundStatus } from "./message-log";
+import { refreshInboundStatus, recordAttempt, updateAttempt } from "./attempts";
 import { deliverOutbound } from "./delivery";
 
 export interface SendJobPayload {
@@ -12,6 +12,7 @@ export interface SendJobPayload {
   inboundMessageId: string;
   ruleId: string;
   threadKey: string;
+  attemptId?: string;
   message: OutboundMessage;
 }
 
@@ -88,7 +89,18 @@ export async function drainJobs(env: Env, limit = 2): Promise<number> {
           .run();
         const payload = parseJson<SendJobPayload>(job.payload_json, {} as SendJobPayload);
         if (payload.inboundMessageId) {
-          await updateInboundStatus(env, payload.inboundMessageId, "failed", message);
+          if (payload.attemptId) {
+            await updateAttempt(env, payload.attemptId, { status: "failed", reason: message });
+          } else if (payload.ruleId) {
+            await recordAttempt(env, {
+              inboundMessageId: payload.inboundMessageId,
+              mailboxId: payload.mailboxId,
+              ruleId: payload.ruleId,
+              status: "failed",
+              reason: message,
+            });
+          }
+          await refreshInboundStatus(env, payload.inboundMessageId);
         }
       } else {
         const backoffMs = Math.min(6 * 3600_000, 60_000 * Math.pow(2, attempts));
@@ -98,6 +110,13 @@ export async function drainJobs(env: Env, limit = 2): Promise<number> {
         )
           .bind(attempts, now() + backoffMs, message.slice(0, 1000), now(), job.id)
           .run();
+        const payload = parseJson<SendJobPayload>(job.payload_json, {} as SendJobPayload);
+        if (payload.attemptId) {
+          await updateAttempt(env, payload.attemptId, {
+            status: "queued",
+            reason: `发送失败，等待重试: ${message}`,
+          });
+        }
       }
     }
   }
@@ -127,7 +146,7 @@ async function runSendJob(env: Env, payload: SendJobPayload): Promise<void> {
     : await getOutboundChannel(env, mailbox.id);
   if (!channel) throw new Error("没有可用的发信通道");
 
-  await deliverOutbound(env, {
+  const result = await deliverOutbound(env, {
     mailbox,
     channel,
     inboundMessageId: payload.inboundMessageId,
@@ -135,6 +154,23 @@ async function runSendJob(env: Env, payload: SendJobPayload): Promise<void> {
     threadKey: payload.threadKey,
     message: payload.message,
   });
+
+  if (payload.attemptId) {
+    await updateAttempt(env, payload.attemptId, {
+      status: "sent",
+      reason: null,
+      outboundMessageId: result.outboundId,
+    });
+  } else {
+    await recordAttempt(env, {
+      inboundMessageId: payload.inboundMessageId,
+      mailboxId: payload.mailboxId,
+      ruleId: payload.ruleId,
+      status: "sent",
+      outboundMessageId: result.outboundId,
+    });
+  }
+  await refreshInboundStatus(env, payload.inboundMessageId);
 }
 
 export async function listJobs(env: Env, limit = 100): Promise<JobRow[]> {

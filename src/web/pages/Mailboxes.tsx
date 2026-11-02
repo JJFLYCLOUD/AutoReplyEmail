@@ -508,6 +508,12 @@ export default function MailboxesPage() {
             </p>
 
             {form.outboundKind === "cf_reply" ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-700">
+                Cloudflare 原生回复仅执行首个匹配规则，只回复一封邮件。需要一封邮件回复多次，请改用
+                SMTP / Resend / Mailgun。
+              </div>
+            ) : null}
+            {form.outboundKind === "cf_reply" ? (
               <p className="text-[11px] leading-5 text-slate-500">
                 仅适用于 Cloudflare Email Routing 入站邮件；只能即时回复，失败不会切换其他通道。
               </p>

@@ -26,6 +26,7 @@ import { evaluateStaticGuards, mergeGuardOptions } from "../services/guard";
 import { renderTemplate } from "../services/template";
 import { loadSettings, toPublicSettings, updateSettings } from "../services/settings";
 import { getMessage, insertOutboundMessage, listMessages, recordSendLog } from "../services/message-log";
+import { listAttempts } from "../services/attempts";
 import { drainJobs, listJobs, retryJob } from "../services/jobs";
 import { outboundMessageFrom, sendViaChannel } from "../adapters/outbound";
 import { testImapConnection } from "../adapters/inbound/imap";
@@ -617,7 +618,7 @@ export function createApi(): Hono<AppEnv> {
         console.error("failed to read raw message", String(error));
       }
     }
-    return c.json({ message, raw });
+    return c.json({ message, raw, attempts: await listAttempts(c.env, message.id) });
   });
 
   api.get("/messages/:id/raw", async (c) => {
@@ -700,6 +701,9 @@ export function createApi(): Hono<AppEnv> {
         // ignore
       }
     }
+    await c.env.DB.prepare("DELETE FROM reply_attempts WHERE inbound_message_id = ?")
+      .bind(message.id)
+      .run();
     await c.env.DB.prepare("DELETE FROM messages WHERE id = ?").bind(message.id).run();
     await audit(c.env, c.get("user").email, "message.delete", "message", message.id);
     return c.json({ ok: true });

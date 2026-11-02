@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../api";
 import { useApi } from "../hooks";
-import type { Job, Mailbox, Message } from "../types";
+import type { Job, Mailbox, Message, ReplyAttempt } from "../types";
 import {
   Badge,
   Button,
@@ -34,7 +34,11 @@ export default function LogsPage() {
   const messages = useApi<{ items: Message[] }>(`/messages?${params.toString()}`);
   const jobs = useApi<{ items: Job[] }>("/jobs?limit=50");
 
-  const [selected, setSelected] = useState<{ message: Message; raw: string | null } | null>(null);
+  const [selected, setSelected] = useState<{
+    message: Message;
+    raw: string | null;
+    attempts?: ReplyAttempt[];
+  } | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -46,7 +50,11 @@ export default function LogsPage() {
   async function openMessage(message: Message) {
     setLoadingDetail(true);
     try {
-      const detail = await api.get<{ message: Message; raw: string | null }>(`/messages/${message.id}`);
+      const detail = await api.get<{
+        message: Message;
+        raw: string | null;
+        attempts?: ReplyAttempt[];
+      }>(`/messages/${message.id}`);
       setSelected(detail);
     } catch (err) {
       alert(String(err instanceof Error ? err.message : err));
@@ -336,6 +344,40 @@ export default function LogsPage() {
                 </div>
               ) : null}
             </div>
+
+            {selected.attempts && selected.attempts.length ? (
+              <div>
+                <h4 className="mb-1 text-xs font-medium text-slate-600">规则执行</h4>
+                <div className="overflow-hidden rounded-lg border border-slate-200">
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="bg-slate-50 text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">规则</th>
+                        <th className="px-3 py-2 font-medium">状态</th>
+                        <th className="px-3 py-2 font-medium">说明</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {selected.attempts.map((attempt) => (
+                        <tr key={attempt.id}>
+                          <td className="px-3 py-2 text-slate-700">
+                            {attempt.rule_name || attempt.rule_id}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge tone={statusTone(attempt.status)}>
+                              {statusLabel(attempt.status)}
+                            </Badge>
+                          </td>
+                          <td className="px-3 py-2 text-slate-500">
+                            {attempt.reason || "-"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
 
             <div>
               <h4 className="mb-1 text-xs font-medium text-slate-600">正文</h4>

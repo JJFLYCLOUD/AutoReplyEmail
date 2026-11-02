@@ -3,7 +3,7 @@ import {
   type OutboundMessage,
 } from "../adapters/outbound";
 import type { Env, MailboxRow, OutboundChannelRow } from "../types";
-import { insertOutboundMessage, recordSendLog, updateInboundStatus } from "./message-log";
+import { insertOutboundMessage, recordSendLog } from "./message-log";
 
 export interface DeliveryInput {
   mailbox: MailboxRow;
@@ -55,7 +55,6 @@ export async function deliverOutbound(
     result.providerMessageId || null,
     result.response || null,
   );
-  await updateInboundStatus(env, input.inboundMessageId, "replied");
 
   const durationMs = Date.now() - startedAt;
   console.log("outbound delivered", {

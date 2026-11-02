@@ -23,9 +23,9 @@ export async function claimReply(env: Env, input: ThrottleInput): Promise<Thrott
   if (input.cooldownHours > 0) {
     const last = await env.DB.prepare(
       `SELECT MAX(replied_at) AS last_reply FROM reply_ledger
-       WHERE mailbox_id = ? AND sender_key = ?`,
+       WHERE mailbox_id = ? AND rule_id = ? AND sender_key = ?`,
     )
-      .bind(input.mailboxId, input.senderKey)
+      .bind(input.mailboxId, input.ruleId, input.senderKey)
       .first<{ last_reply: number | null }>();
     const cutoff = timestamp - input.cooldownHours * 3600_000;
     if (last?.last_reply && last.last_reply > cutoff) {
@@ -53,7 +53,7 @@ export async function claimReply(env: Env, input: ThrottleInput): Promise<Thrott
   const claim = await env.DB.prepare(
     `INSERT INTO reply_ledger (id, mailbox_id, rule_id, thread_key, sender_key, reply_count, replied_at)
      VALUES (?, ?, ?, ?, ?, 1, ?)
-     ON CONFLICT(mailbox_id, thread_key) DO UPDATE SET
+     ON CONFLICT(mailbox_id, rule_id, thread_key) DO UPDATE SET
        reply_count = reply_ledger.reply_count + 1,
        replied_at = excluded.replied_at
      WHERE reply_ledger.reply_count < ?`,
@@ -79,18 +79,19 @@ export async function claimReply(env: Env, input: ThrottleInput): Promise<Thrott
 export async function releaseReplyClaim(
   env: Env,
   mailboxId: string,
+  ruleId: string,
   threadKey: string,
 ): Promise<void> {
   await env.DB.prepare(
     `UPDATE reply_ledger SET reply_count = reply_ledger.reply_count - 1
-     WHERE mailbox_id = ? AND thread_key = ? AND reply_count > 1`,
+     WHERE mailbox_id = ? AND rule_id = ? AND thread_key = ? AND reply_count > 1`,
   )
-    .bind(mailboxId, threadKey)
+    .bind(mailboxId, ruleId, threadKey)
     .run();
   await env.DB.prepare(
     `DELETE FROM reply_ledger
-     WHERE mailbox_id = ? AND thread_key = ? AND reply_count <= 1`,
+     WHERE mailbox_id = ? AND rule_id = ? AND thread_key = ? AND reply_count <= 1`,
   )
-    .bind(mailboxId, threadKey)
+    .bind(mailboxId, ruleId, threadKey)
     .run();
 }
